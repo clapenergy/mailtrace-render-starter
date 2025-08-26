@@ -3,23 +3,23 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>MailTrace Beta Upload</title>
+    <title>MailTrace — Beta Uploader</title>
     <style>
-      body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; padding: 24px; max-width: 900px; margin: 0 auto; }
-      .card { border: 1px solid #e5e7eb; border-radius: 16px; padding: 24px; box-shadow: 0 2px 10px rgba(0,0,0,0.04); }
+      body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; padding: 28px; max-width: 980px; margin: 0 auto; }
+      .card { border: 1px solid #e5e7eb; border-radius: 16px; padding: 24px; box-shadow: 0 2px 10px rgba(0,0,0,0.04); background: #fff; }
       .row { display: flex; gap: 16px; flex-wrap: wrap; }
-      label { font-weight: 600; }
+      label { font-weight: 700; }
       input[type="file"] { display:block; margin-top: 8px; }
-      button { padding: 10px 16px; border-radius: 10px; border: 1px solid #e5e7eb; cursor: pointer; }
+      button { padding: 12px 18px; border-radius: 12px; border: 1px solid #e5e7eb; cursor: pointer; background: #10b981; color: white; font-weight: 700; }
       .note { color: #6b7280; font-size: 14px; }
-      .brand { font-weight: 800; letter-spacing: 0.5px; }
-      .mt { color: #10b981; } /* green accent */
+      .brand { font-weight: 900; letter-spacing: 0.5px; }
+      .mt { color: #10b981; }
       .flash { color: #b91c1c; margin-bottom: 8px; }
     </style>
   </head>
   <body>
     <h1 class="brand"><span class="mt">Mail</span>Trace — Beta Uploader</h1>
-    <p class="note">Upload two CSV files: your <strong>Mail History</strong> and your <strong>CRM list</strong>. We’ll run a quick match and render a preview dashboard.</p>
+    <p class="note">Upload two CSV files: your <strong>Mail History</strong> and your <strong>CRM list</strong>. We'll auto-detect address columns and let you confirm before matching.</p>
 
     {% with messages = get_flashed_messages() %}
       {% if messages %}
@@ -31,19 +31,19 @@
 
     <form class="card" action="/upload" method="POST" enctype="multipart/form-data">
       <div class="row">
-        <div style="flex:1; min-width: 260px;">
+        <div style="flex:1; min-width: 280px;">
           <label>Mail History CSV</label>
           <input type="file" name="mail_csv" accept=".csv" required />
           <p class="note">Any header format is fine for beta.</p>
         </div>
-        <div style="flex:1; min-width: 260px;">
+        <div style="flex:1; min-width: 280px;">
           <label>CRM CSV</label>
           <input type="file" name="crm_csv" accept=".csv" required />
-          <p class="note">We auto-detect addresses and normalize.</p>
+          <p class="note">We normalize addresses and account for units.</p>
         </div>
       </div>
       <div style="margin-top:16px;">
-        <button type="submit">Run Match</button>
+        <button type="submit">Continue</button>
       </div>
     </form>
   </body>

@@ -1,43 +1,42 @@
 <!doctype html>
 <html>
   <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta charset="utf-8"/>
+    <meta name="viewport" content="width=device-width, initial-scale=1"/>
     <title>MailTrace — Results</title>
     <style>
-      body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; padding: 24px; max-width: 1100px; margin: 0 auto; }
-      .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 24px; }
-      .card { border: 1px solid #e5e7eb; border-radius: 16px; padding: 16px; box-shadow: 0 2px 10px rgba(0,0,0,0.04); }
-      .k { font-size: 13px; color: #6b7280; }
-      .v { font-size: 26px; font-weight: 800; }
+      body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; padding: 28px; max-width: 1200px; margin: 0 auto; }
+      .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; margin-bottom: 24px; }
+      .card { border: 1px solid #e5e7eb; border-radius: 16px; padding: 16px; box-shadow: 0 2px 10px rgba(0,0,0,0.04); background:#fff; }
+      .k { color:#6b7280; font-size: 13px; }
+      .v { font-size: 26px; font-weight: 900; }
+      .actions { display: flex; gap: 12px; margin: 12px 0 24px 0; }
+      button { padding: 10px 16px; border-radius: 10px; border: 1px solid #e5e7eb; cursor: pointer; }
       table { width: 100%; border-collapse: collapse; }
       th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid #f3f4f6; font-size: 14px; }
       th { background: #f9fafb; position: sticky; top: 0; }
-      .actions { display: flex; gap: 12px; margin-bottom: 16px; }
-      button { padding: 10px 16px; border-radius: 10px; border: 1px solid #e5e7eb; cursor: pointer; }
-      .badge { display: inline-block; padding: 4px 8px; border-radius: 999px; background: #10b98122; color: #065f46; font-weight: 700; font-size: 12px; }
+      .badge { display:inline-block; padding: 4px 8px; border-radius:999px; background:#10b98122; color:#065f46; font-weight:700; font-size:12px; }
     </style>
   </head>
   <body>
     <h1>Results</h1>
-    <div class="kpis">
+    <div class="grid">
       <div class="card"><div class="k">Mail Rows</div><div class="v">{{ kpis.mail_rows }}</div></div>
       <div class="card"><div class="k">CRM Rows</div><div class="v">{{ kpis.crm_rows }}</div></div>
       <div class="card"><div class="k">Matches</div><div class="v">{{ kpis.matches }}</div></div>
       <div class="card"><div class="k">Match Rate vs Mail</div><div class="v">{{ kpis["match_rate_vs_mail_%"] }}%</div></div>
       <div class="card"><div class="k">Match Rate vs CRM</div><div class="v">{{ kpis["match_rate_vs_crm_%"] }}%</div></div>
+      <div class="card"><div class="k">Average Confidence</div><div class="v">{{ kpis["avg_confidence"] }}</div></div>
     </div>
 
-    <div class="actions">
-      <form action="/download" method="POST" enctype="multipart/form-data">
-        <!-- pass files again for a one-click download build (beta convenience) -->
-        <input type="hidden" name="__hint" value="rebuild-from-files" />
-        <input type="file" name="mail_csv" accept=".csv" required style="display:none" />
-        <input type="file" name="crm_csv" accept=".csv" required style="display:none" />
-        <button type="button" onclick="document.querySelectorAll('input[type=file]').forEach((i,idx)=>i.files = window.__files[idx]); this.form.submit();">Download All Matches (CSV)</button>
-      </form>
-      <span class="badge">{{ download_bytes }} bytes</span>
-    </div>
+    <form class="actions" action="/download" method="POST">
+      <input type="hidden" name="mail_addr" value="{{ request.form.get('mail_addr') }}"/>
+      <input type="hidden" name="crm_addr" value="{{ request.form.get('crm_addr') }}"/>
+      <input type="hidden" name="mail_json" value='{{ request.form.get("mail_json") }}'/>
+      <input type="hidden" name="crm_json" value='{{ request.form.get("crm_json") }}'/>
+      <button type="submit">Download All Matches (CSV)</button>
+      <span class="badge">{{ csv_len }} bytes</span>
+    </form>
 
     <table>
       <thead>
@@ -49,19 +48,18 @@
         {% for row in rows %}
           <tr>
             {% for cell in row %}
-              <td>{{ cell }}</td>
+              <td>
+                {% set colname = columns[loop.index0] %}
+                {% if colname == 'match_notes' %}
+                  {{ 'none' if (cell|string).lower() in ['','nan','none'] else cell }}
+                {% else %}
+                  {{ '' if (cell|string).lower() in ['nan','none'] else cell }}
+                {% endif %}
+              </td>
             {% endfor %}
           </tr>
         {% endfor %}
       </tbody>
     </table>
-
-    <script>
-      // Keep a reference to originally uploaded files so the Download button can submit them again.
-      // On a real system, you'd persist to S3 and reference keys.
-      window.__files = [];
-      // This is just a placeholder; actual File objects won't survive navigation in production.
-      // Use S3 for persistence when you move beyond beta.
-    </script>
   </body>
 </html>
