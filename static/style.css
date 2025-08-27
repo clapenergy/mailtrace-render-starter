@@ -1,6 +1,6 @@
 :root {
-  --brand: #0c2d4e;   /* deep blue from logo */
-  --accent: #759d40;  /* green from logo */
+  --brand: #0c2d4e;   /* deep blue */
+  --accent: #759d40;  /* green */
   --bg: #ffffff;
   --text: #0f172a;
   --muted: #64748b;
@@ -8,32 +8,38 @@
   --border: #e5e7eb;
 }
 
-* { box-sizing: border-box; }
-html, body { margin:0; padding:0; }
+* { box-sizing: border-box; margin:0; padding:0; }
 body {
   font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
   background: var(--bg);
   color: var(--text);
 }
 
-.container { max-width: 1200px; margin: 0 auto; padding: 24px; }
+.container { max-width: 1200px; margin: 0 auto; padding: 16px 24px; }
 
-/* Clean header: no colored bar, just logo */
-.topbar { background: transparent !important; box-shadow: none !important; border: none !important; }
-.nav { display:flex; align-items:center; gap:20px; padding: 24px 0; }
-.brand-title { display: none; } /* hide extra text title so logo stands alone */
+/* Header with gradient bottom accent */
+.topbar { background: transparent; border: none; box-shadow: none; }
+.nav { display:flex; align-items:center; gap:20px; padding: 12px 0 8px 0; }
+.brand-title { display: none; }
 
-/* Large, non-distorting logo */
 .logo {
-  height: 140px;
+  height: 160px;
   width: auto;
   object-fit: contain;
 }
 @media (min-width: 768px) {
-  .logo { height: 180px; }
+  .logo { height: 200px; }
 }
 
-/* Cards, rows, inputs */
+/* Gradient bar below header */
+.header-accent {
+  width: 100%;
+  height: 40px;
+  background: linear-gradient(to bottom, rgba(12,45,78,0.08), rgba(255,255,255,0));
+  margin-top: -16px; /* tuck closer to logo */
+}
+
+/* Card, rows, inputs */
 .card {
   background: var(--card);
   border: 1px solid var(--border);
@@ -48,31 +54,30 @@ input[type="file"] { display:block; margin-top:8px; }
 /* Buttons use green accent */
 .button, button {
   display:inline-block;
-  padding: 14px 22px;
+  padding: 16px 26px;
   border-radius: 12px;
   border: 1px solid var(--accent);
   background: var(--accent);
   color: #ffffff;
   font-weight:800;
-  font-size: 16px;
+  font-size: 18px;
   text-decoration:none;
   cursor:pointer;
   box-shadow: 0 3px 10px rgba(117,157,64,.20);
 }
 .button.secondary { background: transparent; color: var(--brand); border-color: var(--brand); }
-.button:hover, button:hover { filter: brightness(0.98); transform: translateY(-1px); transition: transform .1s ease; }
+.button:hover, button:hover { filter: brightness(0.97); transform: translateY(-1px); transition: transform .1s ease; }
 
 /* KPIs and tables use blue accents */
 .grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap:16px; margin: 24px 0; }
 .kpi .k { color: var(--muted); font-size: 13px; }
-.kpi .v { font-size: 32px; font-weight: 900; }
+.kpi .v { font-size: 34px; font-weight: 900; }
 .kpi { border-top: 5px solid var(--brand); background: #fff; }
 
 table { width: 100%; border-collapse: collapse; background: #fff; border-radius: 12px; overflow: hidden; }
 th, td { text-align:left; padding: 14px 16px; border-bottom: 1px solid #edf2f7; font-size: 14px; }
 th { background: #f0f4f9; color: var(--brand); }
 
-/* Links */
 a { color: var(--brand); text-decoration: none; font-weight: 600; }
 a:hover { opacity: .9; }
 
