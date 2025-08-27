@@ -3,9 +3,7 @@ import io
 import re
 import pandas as pd
 from flask import Flask, render_template, request, redirect, url_for, send_file, flash, session
-from werkzeug.utils import secure_filename
 
-# Optional: basic password gate. Set MAILTRACE_PASSWORD in env to enable.
 PASSWORD = os.environ.get("MAILTRACE_PASSWORD", "").strip()
 
 app = Flask(__name__)
@@ -14,12 +12,10 @@ app.config["MAX_CONTENT_LENGTH"] = 200 * 1024 * 1024  # 200MB
 
 ALLOWED_EXTENSIONS = {"csv"}
 
-# ---------- Utils
 def allowed_file(filename):
     return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
 
 def abbreviate(st):
-    # Common street abbreviations
     pairs = [
         (r"\bavenue\b", "ave"),
         (r"\bav\b", "ave"),
@@ -29,7 +25,6 @@ def abbreviate(st):
         (r"\broad\b", "rd"),
         (r"\bdrive\b", "dr"),
         (r"\bdr\b", "dr"),
-        (r"\broad\b", "rd"),
         (r"\bboulevard\b", "blvd"),
         (r"\bplace\b", "pl"),
         (r"\bcourt\b", "ct"),
@@ -66,14 +61,12 @@ def strip_unit(s):
     return UNIT_PAT.sub(" ", s or "").strip()
 
 def guess_address_col(df):
-    # Try common address column names in order
     candidates = [
         "address1","address_1","address","street","street1","addr1","addr_1","address line 1","Address1","Address","Street"
     ]
     for c in candidates:
         if c in df.columns:
             return c
-    # Fallback: first text-like column
     return df.columns[0]
 
 def normalize_df(df, addr_col):
@@ -84,8 +77,6 @@ def normalize_df(df, addr_col):
     return df
 
 def score_match(row):
-    # Simple confidence heuristic:
-    # 100 if normalized base matches exactly; -25 penalty if units mismatch; +10 if units match
     base_equal = row["__addr_nounit___mail"] == row["__addr_nounit___crm"]
     score = 100 if base_equal else 0
     notes = []
@@ -106,18 +97,12 @@ def score_match(row):
         else:
             notes.append("no units")
     else:
-        # Not a base match: very low score; keep for debugging if needed
-        score = 0
         notes.append("base address differs")
-    # Bound scores
-    if score < 0: score = 0
-    if score > 100: score = 100
+    score = max(0, min(110, score))
     return score, (", ".join(notes) if notes else "")
 
-# ---------- Routes
 @app.route("/", methods=["GET", "POST"])
 def index():
-    # Optional password gate
     if PASSWORD:
         if request.method == "POST" and "password" in request.form:
             if request.form.get("password") == PASSWORD:
@@ -152,22 +137,21 @@ def upload():
         crm_file.stream.seek(0)
         crm_df = pd.read_csv(crm_file, encoding_errors="ignore")
 
-    # Try to guess address columns
     mail_addr = guess_address_col(mail_df)
     crm_addr = guess_address_col(crm_df)
 
-    # If our guess is obviously wrong (e.g., identical first column with weird name), offer manual mapping
-    return render_template("confirm_mapping.html",
-                           mail_cols=list(mail_df.columns),
-                           crm_cols=list(crm_df.columns),
-                           mail_guess=mail_addr,
-                           crm_guess=crm_addr,
-                           mail_json=mail_df.to_json(orient="records"),
-                           crm_json=crm_df.to_json(orient="records"))
+    return render_template(
+        "confirm_mapping.html",
+        mail_cols=list(mail_df.columns),
+        crm_cols=list(crm_df.columns),
+        mail_guess=mail_addr,
+        crm_guess=crm_addr,
+        mail_json=mail_df.to_json(orient="records"),
+        crm_json=crm_df.to_json(orient="records"),
+    )
 
 @app.route("/run", methods=["POST"])
 def run():
-    # Receive mapping + data payloads as JSON strings
     mail_addr = request.form.get("mail_addr")
     crm_addr = request.form.get("crm_addr")
     mail_json = request.form.get("mail_json")
@@ -183,11 +167,9 @@ def run():
         flash("Selected columns not found. Please try again.")
         return redirect(url_for("index"))
 
-    # Normalize
     mail_df = normalize_df(mail_df, mail_addr)
     crm_df = normalize_df(crm_df, crm_addr)
 
-    # Inner join on normalized base address
     merged = pd.merge(
         mail_df.add_suffix("_mail"),
         crm_df.add_suffix("_crm"),
@@ -196,9 +178,7 @@ def run():
         how="inner"
     )
 
-    # Score & notes
-    scores = []
-    notes = []
+    scores, notes = [], []
     for _, r in merged.iterrows():
         s, n = score_match(r)
         scores.append(s)
@@ -206,7 +186,6 @@ def run():
     merged["confidence"] = scores
     merged["match_notes"] = notes
 
-    # KPIs
     kpis = {
         "mail_rows": int(len(mail_df)),
         "crm_rows": int(len(crm_df)),
@@ -216,20 +195,15 @@ def run():
         "avg_confidence": round(float(merged["confidence"].mean()) if len(merged) else 0.0, 2)
     }
 
-    # Build preview table (limit 500 rows)
     preview = merged.copy()
-    # Optional: choose a subset of columns to display first
     front_cols = [
         f"{mail_addr}_mail", f"{crm_addr}_crm",
         "__unit___mail", "__unit___crm",
         "confidence", "match_notes"
     ]
     ordered_cols = [c for c in front_cols if c in preview.columns] + [c for c in preview.columns if c not in front_cols]
-    preview = preview[ordered_cols]
+    preview = preview[ordered_cols].head(500)
 
-    preview = preview.head(500)
-
-    # CSV for download
     out_csv = io.StringIO()
     export_df = merged.drop(columns=[c for c in merged.columns if c.startswith("__")], errors="ignore")
     export_df.to_csv(out_csv, index=False)
@@ -240,12 +214,15 @@ def run():
         kpis=kpis,
         columns=list(preview.columns),
         rows=preview.values.tolist(),
-        csv_len=len(csv_bytes)
+        csv_len=len(csv_bytes),
+        mail_addr=mail_addr,
+        crm_addr=crm_addr,
+        mail_json=mail_json,
+        crm_json=crm_json
     )
 
 @app.route("/download", methods=["POST"])
 def download():
-    # Recompute from posted JSON (stateless, no persistence)
     mail_addr = request.form.get("mail_addr")
     crm_addr = request.form.get("crm_addr")
     mail_json = request.form.get("mail_json")
@@ -265,8 +242,7 @@ def download():
         how="inner"
     )
 
-    scores = []
-    notes = []
+    scores, notes = [], []
     for _, r in merged.iterrows():
         s, n = score_match(r)
         scores.append(s)
@@ -279,3 +255,6 @@ def download():
     export_df.to_csv(out, index=False)
     out.seek(0)
     return send_file(out, mimetype="text/csv", as_attachment=True, download_name="mailtrace_matches.csv")
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))

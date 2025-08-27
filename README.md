@@ -1,23 +1,20 @@
-# MailTrace — Full Beta Bundle
+MailTrace — Fresh Site (Drop-In)
 
-Features:
-- Upload 2 CSVs (Mail History + CRM)
-- Auto-detect address columns → confirm mapping UI
-- Address normalization + unit parsing
-- Confidence scoring (unit mismatch penalty)
-- KPI cards + preview table
-- "none" rule shown only in `match_notes`; blanks elsewhere
-- Optional Basic Auth: set `MAILTRACE_PASSWORD` env var
-- Render-ready (Procfile + requirements)
+What this is:
+- Complete Flask app ready for Render
+- Your logo wired everywhere (header) and as favicons
+- Pages: upload → confirm mapping → results → download
 
-## Deploy on Render
+Deploy / Replace:
+1) On GitHub, open your repo (main branch). Press '.' to open the web editor.
+2) Delete everything in the repo (Explorer left panel → right-click → Delete).
+3) Click 'Upload' (or drag the contents of this zip into the editor). Commit.
+4) Render auto-redeploys. Visit your URL.
 
-1) Connect repo → **Web Service**
-2) Build Command: `pip install -r requirements.txt`
-3) Start Command: `gunicorn app:app`
-4) Optional env vars:
-   - `SECRET_KEY` = long random string
-   - `MAILTRACE_PASSWORD` = (if you want a password gate)
+Render settings (already compatible):
+- Build: pip install -r requirements.txt
+- Start: gunicorn app:app
 
-## Notes
-- Files are processed in memory; no persistence. For production, wire S3 and pass object keys between routes.
+Optional env vars:
+- SECRET_KEY = any long random string
+- MAILTRACE_PASSWORD = if you want a password gate on /
