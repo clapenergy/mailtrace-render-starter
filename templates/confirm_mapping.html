@@ -1,64 +1,44 @@
 <!doctype html>
 <html>
   <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Confirm Mapping — MailTrace</title>
-    
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
-  <link rel="icon" type="image/png" sizes="16x16" href="{{ url_for('static', filename='favicon-16.png') }}">
-  <link rel="icon" type="image/png" sizes="32x32" href="{{ url_for('static', filename='favicon-32.png') }}">
-  <link rel="icon" type="image/png" sizes="64x64" href="{{ url_for('static', filename='favicon-64.png') }}">
-  <link rel="apple-touch-icon" sizes="180x180" href="{{ url_for('static', filename='favicon-180.png') }}">
-  <link rel="icon" type="image/png" sizes="192x192" href="{{ url_for('static', filename='favicon-192.png') }}">
-  <link rel="icon" type="image/x-icon" href="{{ url_for('static', filename='favicon.ico') }}">
-
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
   </head>
   <body>
-    
-  <div class="topbar">
     <div class="container">
       <header class="nav">
-        <a href="{{ url_for('index') }}" class="logo-link" aria-label="MailTrace Home">
-          <img src="{{ url_for('static', filename='logo.png') }}" alt="MailTrace logo" class="logo" />
-        </a>
-        <h1 class="brand-title">MailTrace</h1>
+        <a href="{{ url_for('index') }}"><img src="{{ url_for('static', filename='logo.png') }}" class="logo" alt="MailTrace logo"></a>
       </header>
-    </div>
-  </div>
+      <div class="header-accent"></div>
 
-    <div class="container">
-      
-  <h2>Confirm Column Mapping</h2>
-  <p class="note">We guessed your address columns. Confirm or adjust below, then run the match.</p>
-  <form class="card" action="/run" method="POST">
-    <div class="row">
-      <div style="flex:1; min-width: 280px;">
-        <label>Mail CSV — Address Column</label><br/>
-        <select name="mail_addr" required>
-          {% for col in mail_cols %}
-            <option value="{{ col }}" {% if col == mail_guess %}selected{% endif %}>{{ col }}</option>
-          {% endfor %}
-        </select>
-      </div>
-      <div style="flex:1; min-width: 280px;">
-        <label>CRM CSV — Address Column</label><br/>
-        <select name="crm_addr" required>
-          {% for col in crm_cols %}
-            <option value="{{ col }}" {% if col == crm_guess %}selected{% endif %}>{{ col }}</option>
-          {% endfor %}
-        </select>
-      </div>
-    </div>
+      <h2>Confirm Column Mapping</h2>
+      <p class="note">We guessed your address columns. Confirm or adjust below, then run the match.</p>
+      <form class="card" action="/run" method="POST">
+        <div class="row">
+          <div style="flex:1; min-width: 280px;">
+            <label>Mail CSV — Address Column</label><br/>
+            <select name="mail_addr" required>
+              {% for col in mail_cols %}
+                <option value="{{ col }}" {% if col == mail_guess %}selected{% endif %}>{{ col }}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <div style="flex:1; min-width: 280px;">
+            <label>CRM CSV — Address Column</label><br/>
+            <select name="crm_addr" required>
+              {% for col in crm_cols %}
+                <option value="{{ col }}" {% if col == crm_guess %}selected{% endif %}>{{ col }}</option>
+              {% endfor %}
+            </select>
+          </div>
+        </div>
 
-    <input type="hidden" name="mail_json" value='{{ mail_json | tojson | safe }}' />
-    <input type="hidden" name="crm_json" value='{{ crm_json | tojson | safe }}' />
-
-    <div style="margin-top:16px;">
-      <button class="button" type="submit">Run Match</button>
-    </div>
-  </form>
-
+        <div style="margin-top:16px;">
+          <button class="button" type="submit">Run Match</button>
+        </div>
+      </form>
     </div>
   </body>
 </html>

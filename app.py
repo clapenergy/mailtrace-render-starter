@@ -140,24 +140,27 @@ def upload():
     mail_addr = guess_address_col(mail_df)
     crm_addr = guess_address_col(crm_df)
 
+    # Store data in session (server-side), not in hidden inputs
+    session["mail_json"] = mail_df.to_json(orient="records")
+    session["crm_json"] = crm_df.to_json(orient="records")
+
     return render_template(
         "confirm_mapping.html",
         mail_cols=list(mail_df.columns),
         crm_cols=list(crm_df.columns),
         mail_guess=mail_addr,
         crm_guess=crm_addr,
-        mail_json=mail_df.to_json(orient="records"),
-        crm_json=crm_df.to_json(orient="records"),
     )
 
 @app.route("/run", methods=["POST"])
 def run():
     mail_addr = request.form.get("mail_addr")
     crm_addr = request.form.get("crm_addr")
-    mail_json = request.form.get("mail_json")
-    crm_json = request.form.get("crm_json")
+
+    mail_json = session.get("mail_json")
+    crm_json = session.get("crm_json")
     if not all([mail_addr, crm_addr, mail_json, crm_json]):
-        flash("Missing inputs. Please upload again.")
+        flash("Missing data. Please upload again.")
         return redirect(url_for("index"))
 
     mail_df = pd.read_json(io.StringIO(mail_json))
@@ -204,55 +207,23 @@ def run():
     ordered_cols = [c for c in front_cols if c in preview.columns] + [c for c in preview.columns if c not in front_cols]
     preview = preview[ordered_cols].head(500)
 
-    out_csv = io.StringIO()
-    export_df = merged.drop(columns=[c for c in merged.columns if c.startswith("__")], errors="ignore")
-    export_df.to_csv(out_csv, index=False)
-    csv_bytes = out_csv.getvalue().encode("utf-8")
+    # Save latest merged to session for download
+    session["export_csv"] = merged.drop(columns=[c for c in merged.columns if c.startswith("__")], errors="ignore").to_csv(index=False)
 
     return render_template(
         "result.html",
         kpis=kpis,
         columns=list(preview.columns),
         rows=preview.values.tolist(),
-        csv_len=len(csv_bytes),
+        csv_len=len(session["export_csv"].encode("utf-8")),
         mail_addr=mail_addr,
         crm_addr=crm_addr,
-        mail_json=mail_json,
-        crm_json=crm_json
     )
 
 @app.route("/download", methods=["POST"])
 def download():
-    mail_addr = request.form.get("mail_addr")
-    crm_addr = request.form.get("crm_addr")
-    mail_json = request.form.get("mail_json")
-    crm_json = request.form.get("crm_json")
-
-    mail_df = pd.read_json(io.StringIO(mail_json))
-    crm_df = pd.read_json(io.StringIO(crm_json))
-
-    mail_df = normalize_df(mail_df, mail_addr)
-    crm_df = normalize_df(crm_df, crm_addr)
-
-    merged = pd.merge(
-        mail_df.add_suffix("_mail"),
-        crm_df.add_suffix("_crm"),
-        left_on="__addr_nounit___mail",
-        right_on="__addr_nounit___crm",
-        how="inner"
-    )
-
-    scores, notes = [], []
-    for _, r in merged.iterrows():
-        s, n = score_match(r)
-        scores.append(s)
-        notes.append(n)
-    merged["confidence"] = scores
-    merged["match_notes"] = notes
-
-    export_df = merged.drop(columns=[c for c in merged.columns if c.startswith("__")], errors="ignore")
-    out = io.BytesIO()
-    export_df.to_csv(out, index=False)
+    csv_text = session.get("export_csv", "")
+    out = io.BytesIO(csv_text.encode("utf-8"))
     out.seek(0)
     return send_file(out, mimetype="text/csv", as_attachment=True, download_name="mailtrace_matches.csv")
 
