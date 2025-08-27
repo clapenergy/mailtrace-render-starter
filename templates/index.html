@@ -4,8 +4,17 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>MailTrace — Beta Uploader</title>
+    
+    <!-- Favicon links; these will work once you upload the icon files into /static -->
+    <link rel="icon" type="image/png" sizes="16x16" href="{{ url_for('static', filename='favicon-16.png') }}">
+    <link rel="icon" type="image/png" sizes="32x32" href="{{ url_for('static', filename='favicon-32.png') }}">
+    <link rel="icon" type="image/png" sizes="64x64" href="{{ url_for('static', filename='favicon-64.png') }}">
+    <link rel="apple-touch-icon" sizes="180x180" href="{{ url_for('static', filename='favicon-180.png') }}">
+    <link rel="icon" type="image/png" sizes="192x192" href="{{ url_for('static', filename='favicon-192.png') }}">
+    <link rel="icon" type="image/x-icon" href="{{ url_for('static', filename='favicon.ico') }}">
+
     <style>
-      body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; padding: 28px; max-width: 980px; margin: 0 auto; }
+      body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; padding: 28px; max-width: 1200px; margin: 0 auto; }
       .card { border: 1px solid #e5e7eb; border-radius: 16px; padding: 24px; box-shadow: 0 2px 10px rgba(0,0,0,0.04); background: #fff; }
       .row { display: flex; gap: 16px; flex-wrap: wrap; }
       label { font-weight: 700; }
@@ -15,10 +24,31 @@
       .brand { font-weight: 900; letter-spacing: 0.5px; }
       .mt { color: #10b981; }
       .flash { color: #b91c1c; margin-bottom: 8px; }
+      .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; margin-bottom: 24px; }
+      .k { color:#6b7280; font-size: 13px; }
+      .v { font-size: 26px; font-weight: 900; }
+      .actions { display: flex; gap: 12px; margin: 12px 0 24px 0; }
+      table { width: 100%; border-collapse: collapse; }
+      th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid #f3f4f6; font-size: 14px; }
+      th { background: #f9fafb; position: sticky; top: 0; }
+      .badge { display:inline-block; padding: 4px 8px; border-radius:999px; background:#10b98122; color:#065f46; font-weight:700; font-size:12px; }
+      
+      .nav { display:flex; align-items:center; gap:12px; padding:12px 0 20px; }
+      .logo { height: 36px; max-height: 36px; width: auto; object-fit: contain; image-rendering: auto; }
+      @media (min-width: 768px) { .logo { height: 40px; max-height: 40px; } }
+
     </style>
   </head>
   <body>
-    <h1 class="brand"><span class="mt">Mail</span>Trace — Beta Uploader</h1>
+    
+    <header class="nav">
+      <a href="{{ url_for('index') }}" class="logo-link" aria-label="MailTrace Home">
+        <img src="{{ url_for('static', filename='logo.png') }}" alt="MailTrace logo" class="logo" />
+      </a>
+    </header>
+
+    
+    <h1 class="brand" style="display:none;"><span class="mt">Mail</span>Trace</h1>
     <p class="note">Upload two CSV files: your <strong>Mail History</strong> and your <strong>CRM list</strong>. We'll auto-detect address columns and let you confirm before matching.</p>
 
     {% with messages = get_flashed_messages() %}
@@ -46,5 +76,6 @@
         <button type="submit">Continue</button>
       </div>
     </form>
+
   </body>
 </html>
