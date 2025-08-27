@@ -1,62 +1,50 @@
+
 <!doctype html>
 <html>
   <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>MailTrace — Upload</title>
-    
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
-  <link rel="icon" type="image/png" sizes="16x16" href="{{ url_for('static', filename='favicon-16.png') }}">
-  <link rel="icon" type="image/png" sizes="32x32" href="{{ url_for('static', filename='favicon-32.png') }}">
-  <link rel="icon" type="image/png" sizes="64x64" href="{{ url_for('static', filename='favicon-64.png') }}">
-  <link rel="apple-touch-icon" sizes="180x180" href="{{ url_for('static', filename='favicon-180.png') }}">
-  <link rel="icon" type="image/png" sizes="192x192" href="{{ url_for('static', filename='favicon-192.png') }}">
-  <link rel="icon" type="image/x-icon" href="{{ url_for('static', filename='favicon.ico') }}">
-
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <link rel="icon" type="image/png" sizes="16x16" href="{{ url_for('static', filename='favicon-16.png') }}">
+    <link rel="icon" type="image/png" sizes="32x32" href="{{ url_for('static', filename='favicon-32.png') }}">
+    <link rel="icon" type="image/png" sizes="64x64" href="{{ url_for('static', filename='favicon-64.png') }}">
+    <link rel="apple-touch-icon" sizes="180x180" href="{{ url_for('static', filename='favicon-180.png') }}">
+    <link rel="icon" type="image/png" sizes="192x192" href="{{ url_for('static', filename='favicon-192.png') }}">
+    <link rel="icon" type="image/x-icon" href="{{ url_for('static', filename='favicon.ico') }}">
   </head>
   <body>
-    
-  <div class="topbar">
     <div class="container">
       <header class="nav">
-        <a href="{{ url_for('index') }}" class="logo-link" aria-label="MailTrace Home">
-          <img src="{{ url_for('static', filename='logo.png') }}" alt="MailTrace logo" class="logo" />
-        </a>
-        <h1 class="brand-title">MailTrace</h1>
+        <a href="{{ url_for('index') }}"><img src="{{ url_for('static', filename='logo.png') }}" class="logo" alt="MailTrace logo"></a>
       </header>
-    </div>
-  </div>
+      <div class="header-accent"></div>
 
-    <div class="container">
-      
-  <p class="note">Upload two CSV files: your <strong>Mail History</strong> and your <strong>CRM list</strong>. We'll auto-detect address columns and let you confirm before matching.</p>
+      {% with messages = get_flashed_messages() %}
+        {% if messages %}
+          {% for m in messages %}
+            <div class="flash">{{ m }}</div>
+          {% endfor %}
+        {% endif %}
+      {% endwith %}
 
-  {% with messages = get_flashed_messages() %}
-    {% if messages %}
-      {% for m in messages %}
-        <div class="flash">{{ m }}</div>
-      {% endfor %}
-    {% endif %}
-  {% endwith %}
-
-  <form class="card" action="/upload" method="POST" enctype="multipart/form-data">
-    <div class="row">
-      <div style="flex:1; min-width: 280px;">
-        <label>Mail History CSV</label>
-        <input type="file" name="mail_csv" accept=".csv" required />
-        <p class="note">Any header format is fine for beta.</p>
-      </div>
-      <div style="flex:1; min-width: 280px;">
-        <label>CRM CSV</label>
-        <input type="file" name="crm_csv" accept=".csv" required />
-        <p class="note">We normalize addresses and account for units.</p>
-      </div>
-    </div>
-    <div style="margin-top:16px;">
-      <button class="button" type="submit">Continue</button>
-    </div>
-  </form>
-
+      <form class="card" action="{{ url_for('run') }}" method="POST" enctype="multipart/form-data">
+        <div class="row">
+          <div style="flex:1; min-width: 280px;">
+            <label>Mail History CSV</label>
+            <input type="file" name="mail_csv" accept=".csv" required />
+            <p class="note">Upload your “mail” CSV.</p>
+          </div>
+          <div style="flex:1; min-width: 280px;">
+            <label>CRM CSV</label>
+            <input type="file" name="crm_csv" accept=".csv" required />
+            <p class="note">Upload your CRM list CSV.</p>
+          </div>
+        </div>
+        <div style="margin-top:16px;">
+          <button class="button" type="submit">Continue</button>
+        </div>
+      </form>
     </div>
   </body>
 </html>
