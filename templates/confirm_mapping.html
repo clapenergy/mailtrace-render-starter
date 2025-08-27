@@ -1,78 +1,64 @@
 <!doctype html>
 <html>
   <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Confirm Mapping — MailTrace</title>
     
-    <link rel="icon" type="image/png" sizes="16x16" href="{{ url_for('static', filename='favicon-16.png') }}">
-    <link rel="icon" type="image/png" sizes="32x32" href="{{ url_for('static', filename='favicon-32.png') }}">
-    <link rel="icon" type="image/png" sizes="64x64" href="{{ url_for('static', filename='favicon-64.png') }}">
-    <link rel="apple-touch-icon" sizes="180x180" href="{{ url_for('static', filename='favicon-180.png') }}">
-    <link rel="icon" type="image/png" sizes="192x192" href="{{ url_for('static', filename='favicon-192.png') }}">
-    <link rel="icon" type="image/x-icon" href="{{ url_for('static', filename='favicon.ico') }}">
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  <link rel="icon" type="image/png" sizes="16x16" href="{{ url_for('static', filename='favicon-16.png') }}">
+  <link rel="icon" type="image/png" sizes="32x32" href="{{ url_for('static', filename='favicon-32.png') }}">
+  <link rel="icon" type="image/png" sizes="64x64" href="{{ url_for('static', filename='favicon-64.png') }}">
+  <link rel="apple-touch-icon" sizes="180x180" href="{{ url_for('static', filename='favicon-180.png') }}">
+  <link rel="icon" type="image/png" sizes="192x192" href="{{ url_for('static', filename='favicon-192.png') }}">
+  <link rel="icon" type="image/x-icon" href="{{ url_for('static', filename='favicon.ico') }}">
 
-    <style>
-      
-      .nav { display:flex; align-items:center; gap:12px; padding:12px 0 20px; }
-      .logo { height: 36px; max-height: 36px; width: auto; object-fit: contain; image-rendering: auto; }
-      @media (min-width: 768px) { .logo { height: 42px; max-height: 42px; } }
-      body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; padding: 28px; max-width: 1200px; margin: 0 auto; }
-      .card { border: 1px solid #e5e7eb; border-radius: 16px; padding: 24px; box-shadow: 0 2px 10px rgba(0,0,0,0.04); background: #fff; }
-      .row { display: flex; gap: 16px; flex-wrap: wrap; }
-      label { font-weight: 700; }
-      input[type="file"] { display:block; margin-top: 8px; }
-      button { padding: 12px 18px; border-radius: 12px; border: 1px solid #e5e7eb; cursor: pointer; background: #10b981; color: white; font-weight: 700; }
-      .note { color: #6b7280; font-size: 14px; }
-      .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; margin-bottom: 24px; }
-      .k { color:#6b7280; font-size: 13px; }
-      .v { font-size: 26px; font-weight: 900; }
-      .actions { display: flex; gap: 12px; margin: 12px 0 24px 0; }
-      table { width: 100%; border-collapse: collapse; }
-      th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid #f3f4f6; font-size: 14px; }
-      th { background: #f9fafb; position: sticky; top: 0; }
-      .badge { display:inline-block; padding: 4px 8px; border-radius:999px; background:#10b98122; color:#065f46; font-weight:700; font-size:12px; }
-
-    </style>
   </head>
   <body>
     
-    <header class="nav">
-      <a href="{{ url_for('index') }}" class="logo-link" aria-label="MailTrace Home">
-        <img src="{{ url_for('static', filename='logo.png') }}" alt="MailTrace logo" class="logo" />
-      </a>
-    </header>
+  <div class="topbar">
+    <div class="container">
+      <header class="nav">
+        <a href="{{ url_for('index') }}" class="logo-link" aria-label="MailTrace Home">
+          <img src="{{ url_for('static', filename='logo.png') }}" alt="MailTrace logo" class="logo" />
+        </a>
+        <h1 class="brand-title">MailTrace</h1>
+      </header>
+    </div>
+  </div>
 
-    
-    <h1>Confirm Column Mapping</h1>
-    <p class="note">We guessed your address columns. Confirm or adjust below, then run the match.</p>
-    <form class="card" action="/run" method="POST">
-      <div class="row">
-        <div style="flex:1; min-width: 280px;">
-          <label>Mail CSV — Address Column</label><br/>
-          <select name="mail_addr" required>
-            {% for col in mail_cols %}
-              <option value="{{ col }}" {% if col == mail_guess %}selected{% endif %}>{{ col }}</option>
-            {% endfor %}
-          </select>
-        </div>
-        <div style="flex:1; min-width: 280px;">
-          <label>CRM CSV — Address Column</label><br/>
-          <select name="crm_addr" required>
-            {% for col in crm_cols %}
-              <option value="{{ col }}" {% if col == crm_guess %}selected{% endif %}>{{ col }}</option>
-            {% endfor %}
-          </select>
-        </div>
+    <div class="container">
+      
+  <h2>Confirm Column Mapping</h2>
+  <p class="note">We guessed your address columns. Confirm or adjust below, then run the match.</p>
+  <form class="card" action="/run" method="POST">
+    <div class="row">
+      <div style="flex:1; min-width: 280px;">
+        <label>Mail CSV — Address Column</label><br/>
+        <select name="mail_addr" required>
+          {% for col in mail_cols %}
+            <option value="{{ col }}" {% if col == mail_guess %}selected{% endif %}>{{ col }}</option>
+          {% endfor %}
+        </select>
       </div>
-
-      <input type="hidden" name="mail_json" value='{{ mail_json | tojson | safe }}' />
-      <input type="hidden" name="crm_json" value='{{ crm_json | tojson | safe }}' />
-
-      <div style="margin-top:16px;">
-        <button type="submit">Run Match</button>
+      <div style="flex:1; min-width: 280px;">
+        <label>CRM CSV — Address Column</label><br/>
+        <select name="crm_addr" required>
+          {% for col in crm_cols %}
+            <option value="{{ col }}" {% if col == crm_guess %}selected{% endif %}>{{ col }}</option>
+          {% endfor %}
+        </select>
       </div>
-    </form>
+    </div>
 
+    <input type="hidden" name="mail_json" value='{{ mail_json | tojson | safe }}' />
+    <input type="hidden" name="crm_json" value='{{ crm_json | tojson | safe }}' />
+
+    <div style="margin-top:16px;">
+      <button class="button" type="submit">Run Match</button>
+    </div>
+  </form>
+
+    </div>
   </body>
 </html>
