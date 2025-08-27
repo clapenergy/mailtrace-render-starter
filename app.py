@@ -140,7 +140,7 @@ def upload():
     mail_addr = guess_address_col(mail_df)
     crm_addr = guess_address_col(crm_df)
 
-    # Store data in session (server-side), not in hidden inputs
+    # Store in session
     session["mail_json"] = mail_df.to_json(orient="records")
     session["crm_json"] = crm_df.to_json(orient="records")
 
@@ -187,28 +187,33 @@ def run():
         scores.append(s)
         notes.append(n)
     merged["confidence"] = scores
+    merged["confidence_pct"] = merged["confidence"].clip(0, 100).round(0).astype(int)
     merged["match_notes"] = notes
 
+    # KPIs
+    avg_conf = float(merged["confidence_pct"].mean()) if len(merged) else 0.0
     kpis = {
         "mail_rows": int(len(mail_df)),
         "crm_rows": int(len(crm_df)),
         "matches": int(len(merged)),
         "match_rate_vs_mail_%": round(100.0 * (len(merged) / max(1, len(mail_df))), 2),
         "match_rate_vs_crm_%": round(100.0 * (len(merged) / max(1, len(crm_df))), 2),
-        "avg_confidence": round(float(merged["confidence"].mean()) if len(merged) else 0.0, 2)
+        "avg_confidence_%": round(avg_conf, 1),
     }
 
+    # Preview table
     preview = merged.copy()
     front_cols = [
         f"{mail_addr}_mail", f"{crm_addr}_crm",
         "__unit___mail", "__unit___crm",
-        "confidence", "match_notes"
+        "confidence_pct", "match_notes"
     ]
     ordered_cols = [c for c in front_cols if c in preview.columns] + [c for c in preview.columns if c not in front_cols]
     preview = preview[ordered_cols].head(500)
 
-    # Save latest merged to session for download
-    session["export_csv"] = merged.drop(columns=[c for c in merged.columns if c.startswith("__")], errors="ignore").to_csv(index=False)
+    # Save export CSV (include confidence_pct for clarity)
+    export_df = merged.drop(columns=[c for c in merged.columns if c.startswith("__")], errors="ignore")
+    session["export_csv"] = export_df.to_csv(index=False)
 
     return render_template(
         "result.html",

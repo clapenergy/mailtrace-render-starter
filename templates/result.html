@@ -1,79 +1,60 @@
 <!doctype html>
 <html>
   <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Results — MailTrace</title>
-    
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
-  <link rel="icon" type="image/png" sizes="16x16" href="{{ url_for('static', filename='favicon-16.png') }}">
-  <link rel="icon" type="image/png" sizes="32x32" href="{{ url_for('static', filename='favicon-32.png') }}">
-  <link rel="icon" type="image/png" sizes="64x64" href="{{ url_for('static', filename='favicon-64.png') }}">
-  <link rel="apple-touch-icon" sizes="180x180" href="{{ url_for('static', filename='favicon-180.png') }}">
-  <link rel="icon" type="image/png" sizes="192x192" href="{{ url_for('static', filename='favicon-192.png') }}">
-  <link rel="icon" type="image/x-icon" href="{{ url_for('static', filename='favicon.ico') }}">
-
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
   </head>
   <body>
-    
-  <div class="topbar">
     <div class="container">
       <header class="nav">
-        <a href="{{ url_for('index') }}" class="logo-link" aria-label="MailTrace Home">
-          <img src="{{ url_for('static', filename='logo.png') }}" alt="MailTrace logo" class="logo" />
-        </a>
-        <h1 class="brand-title">MailTrace</h1>
+        <a href="{{ url_for('index') }}"><img src="{{ url_for('static', filename='logo.png') }}" class="logo" alt="MailTrace logo"></a>
       </header>
-    </div>
-  </div>
+      <div class="header-accent"></div>
 
-    <div class="container">
-      
-  <h2>Results</h2>
-  <div class="grid">
-    <div class="card kpi"><div class="k">Mail Rows</div><div class="v">{{ kpis.mail_rows }}</div></div>
-    <div class="card kpi"><div class="k">CRM Rows</div><div class="v">{{ kpis.crm_rows }}</div></div>
-    <div class="card kpi"><div class="k">Matches</div><div class="v">{{ kpis.matches }}</div></div>
-    <div class="card kpi"><div class="k">Match Rate vs Mail</div><div class="v">{{ kpis["match_rate_vs_mail_%"] }}%</div></div>
-    <div class="card kpi"><div class="k">Match Rate vs CRM</div><div class="v">{{ kpis["match_rate_vs_crm_%"] }}%</div></div>
-    <div class="card kpi"><div class="k">Average Confidence</div><div class="v">{{ kpis["avg_confidence"] }}</div></div>
-  </div>
+      <h2>Results</h2>
+      <div class="grid">
+        <div class="card kpi"><div class="k">Mail Rows</div><div class="v">{{ kpis.mail_rows }}</div></div>
+        <div class="card kpi"><div class="k">CRM Rows</div><div class="v">{{ kpis.crm_rows }}</div></div>
+        <div class="card kpi"><div class="k">Matches</div><div class="v">{{ kpis.matches }}</div></div>
+        <div class="card kpi"><div class="k">Match Rate vs Mail</div><div class="v">{{ kpis["match_rate_vs_mail_%"] }}%</div></div>
+        <div class="card kpi"><div class="k">Match Rate vs CRM</div><div class="v">{{ kpis["match_rate_vs_crm_%"] }}%</div></div>
+        <div class="card kpi"><div class="k">Average Confidence</div><div class="v">{{ kpis["avg_confidence_%"] }}%</div></div>
+      </div>
 
-  <form class="actions" action="/download" method="POST">
-    <input type="hidden" name="mail_addr" value="{{ mail_addr }}"/>
-    <input type="hidden" name="crm_addr" value="{{ crm_addr }}"/>
-    <input type="hidden" name="mail_json" value='{{ mail_json }}'/>
-    <input type="hidden" name="crm_json" value='{{ crm_json }}'/>
-    <button class="button" type="submit">Download All Matches (CSV)</button>
-    <span class="badge">{{ csv_len }} bytes</span>
-  </form>
+      <form class="actions" action="/download" method="POST">
+        <button class="button" type="submit">Download All Matches (CSV)</button>
+        <span class="badge">{{ csv_len }} bytes</span>
+      </form>
 
-  <div class="card">
-    <table>
-      <thead>
-        <tr>
-          {% for c in columns %}<th>{{ c }}</th>{% endfor %}
-        </tr>
-      </thead>
-      <tbody>
-        {% for row in rows %}
-          <tr>
-            {% for cell in row %}
-              <td>
-                {% set colname = columns[loop.index0] %}
-                {% if colname == 'match_notes' %}
-                  {{ 'none' if (cell|string).lower() in ['','nan','none'] else cell }}
-                {% else %}
-                  {{ '' if (cell|string).lower() in ['nan','none'] else cell }}
-                {% endif %}
-              </td>
+      <div class="card">
+        <table>
+          <thead>
+            <tr>
+              {% for c in columns %}<th>{{ c }}</th>{% endfor %}
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in rows %}
+              <tr>
+                {% for cell in row %}
+                  <td>
+                    {% set colname = columns[loop.index0] %}
+                    {% if colname == 'match_notes' %}
+                      {{ 'none' if (cell|string).lower() in ['','nan','none'] else cell }}
+                    {% elif colname == 'confidence_pct' %}
+                      {{ (cell|string).rstrip('%') }}%
+                    {% else %}
+                      {{ '' if (cell|string).lower() in ['nan','none'] else cell }}
+                    {% endif %}
+                  </td>
+                {% endfor %}
+              </tr>
             {% endfor %}
-          </tr>
-        {% endfor %}
-      </tbody>
-    </table>
-  </div>
-
+          </tbody>
+        </table>
+      </div>
     </div>
   </body>
 </html>
