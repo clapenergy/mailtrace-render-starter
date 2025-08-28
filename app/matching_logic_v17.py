@@ -7,12 +7,6 @@
 # - City/state/zip must align (normalized)
 # - Confidence buckets: >=94, 88–94, <88
 # - Notes: uses "none" only inside match_notes (never changes your data)
-#
-# Usage:
-#   from matching_logic_v17 import match_mail_to_crm
-#   matches = match_mail_to_crm(mail_df, crm_df)
-#   # matches columns include: mail_idx, crm_idx, confidence, bucket, match_notes, ...
-#
 
 from __future__ import annotations
 import re
@@ -56,10 +50,8 @@ def _nan_like(x) -> bool:
 def normalize_unit(s: str | None) -> str:
     if _nan_like(s): return ""
     s = _lower_strip(s)
-    # Strip leading markers like "unit", "apt", "suite", "#" etc.
     s = s.replace("#", " # ")
     tokens = [t for t in _WS.split(s) if t]
-    # drop tokens like 'unit','apt','suite'
     cleaned = [t for t in tokens if t not in _UNIT_HINTS]
     return " ".join(cleaned)
 
@@ -73,24 +65,16 @@ def normalize_state(s: str | None) -> str:
 
 def normalize_zip(s: str | None) -> str:
     if _nan_like(s): return ""
-    # keep 5-digit for blocking; drop +4
     digits = re.sub(r"[^0-9]", "", str(s))
     return digits[:5]
 
 def _split_address_tokens(addr: str) -> list[str]:
-    # Keep alnum tokens, strip punctuation
     return [t for t in _WS.split(_NON_ALNUM.sub(" ", addr.lower())) if t]
 
 def normalize_address1(addr: str | None) -> dict:
     """
-    Returns:
-      {
-        'orig': original string or '',
-        'house_num': '123',
-        'name_tokens': ['main'],
-        'street_type': 'street' (normalized) or ''
-        'stem': '123 main'  (house number + name tokens only)
-      }
+    Returns dict with:
+      house_num, name_tokens, street_type, stem (house_num + name_tokens), orig
     """
     result = {"orig": "", "house_num": "", "name_tokens": [], "street_type": "", "stem": ""}
     if _nan_like(addr):
@@ -100,7 +84,6 @@ def normalize_address1(addr: str | None) -> dict:
     if not tokens:
         return result
 
-    # house number = leading numeric token (if present)
     if _LEADING_NUM.match(tokens[0]):
         house_num = tokens[0]
         rest = tokens[1:]
@@ -119,20 +102,15 @@ def normalize_address1(addr: str | None) -> dict:
     result["house_num"] = house_num
     result["name_tokens"] = rest
     result["street_type"] = st_type
-    # stem = house_num + name tokens (no street type)
     name_part = " ".join(rest)
     stem = " ".join([x for x in [house_num, name_part] if x])
     result["stem"] = stem
     return result
 
 def parse_date_to_month(s: str | None) -> str:
-    """
-    Accepts various date formats; returns YYYY-MM month key for blocking.
-    We accept dd-mm-yy, mm/dd/yy, yyyy-mm-dd, etc.
-    """
+    """Accept common formats; return YYYY-MM month key."""
     if _nan_like(s): return ""
     s = str(s).strip()
-    # Try common formats
     fmts = ["%d-%m-%y", "%d-%m-%Y", "%m/%d/%y", "%m/%d/%Y", "%Y-%m-%d", "%Y/%m/%d"]
     for fmt in fmts:
         try:
@@ -140,7 +118,6 @@ def parse_date_to_month(s: str | None) -> str:
             return dt.strftime(_MONTH_FMT)
         except ValueError:
             continue
-    # Fallback: try pandas parser
     try:
         dt = pd.to_datetime(s, errors="coerce", utc=False)
         if pd.isna(dt): return ""
@@ -158,25 +135,22 @@ def _compare_street_type(m_type: str, c_type: str) -> tuple[int, str]:
         return 0, ""
     if m_type == c_type:
         return 0, ""
-    # penalty if types differ, but only if stems matched already
     return -6, f"{c_type or 'none'} vs {m_type or 'none'} (street type)"
 
 def _compare_unit(m_unit: str, c_unit: str) -> tuple[int, str]:
     mu = normalize_unit(m_unit)
     cu = normalize_unit(c_unit)
     if mu == "" and cu == "":
-        return 0, ""  # explicitly no penalty
+        return 0, ""
     if mu == "" and cu != "":
         return -8, f"{cu} vs none (unit)"
     if mu != "" and cu == "":
         return -8, f"{'none'} vs {mu} (unit)"
     if mu == cu:
         return 0, ""
-    # both present but different
     return -20, f"{cu} vs {mu} (unit)"
 
 def _require_geo_same(mail_row, crm_row) -> bool:
-    # require city/state/zip equality after normalization
     m_city = normalize_city(mail_row.get("city"))
     c_city = normalize_city(crm_row.get("crm_city"))
     m_state = normalize_state(mail_row.get("state"))
@@ -205,20 +179,17 @@ def _join_notes(*parts: str) -> str:
 def match_mail_to_crm(mail_df: pd.DataFrame, crm_df: pd.DataFrame) -> pd.DataFrame:
     """
     Returns a DataFrame of matches with columns:
-      - mail_idx, crm_idx            (original indices)
-      - confidence (int 0..100)
-      - bucket ('>=94','88–94','<88')
-      - match_notes (text; uses 'none' wording only inside notes)
-      - mail_date, crm_job_date, city/state/zip, address1/address2 (originals)
-    Requires the following columns (can be alias-mapped upstream):
+      - mail_idx, crm_idx, confidence, bucket, match_notes
+      - mail_date, crm_job_date, city/state/zip, address1/address2
+      - crm_address1/2, crm_city/state/zip
+    Expects:
       mail_df: ['address1','address2','city','state','zip','mail_date']
       crm_df:  ['crm_address1','crm_address2','crm_city','crm_state','crm_zip','crm_job_date']
     """
-    # Normalize address1 for blocking
+    # Normalize for blocking
     m_norm = mail_df[["address1","address2","city","state","zip","mail_date"]].copy()
     c_norm = crm_df[["crm_address1","crm_address2","crm_city","crm_state","crm_zip","crm_job_date"]].copy()
 
-    # Build stems & keys
     m_addr = m_norm["address1"].map(normalize_address1)
     c_addr = c_norm["crm_address1"].map(normalize_address1)
 
@@ -241,7 +212,6 @@ def match_mail_to_crm(mail_df: pd.DataFrame, crm_df: pd.DataFrame) -> pd.DataFra
     m_blocks = m_key.to_frame("key").reset_index().rename(columns={"index":"mail_idx"})
     c_blocks = c_key.to_frame("key").reset_index().rename(columns={"index":"crm_idx"})
 
-    # Inner join on block key
     pairs = m_blocks.merge(c_blocks, on="key", how="inner")
 
     out_rows = []
@@ -250,40 +220,28 @@ def match_mail_to_crm(mail_df: pd.DataFrame, crm_df: pd.DataFrame) -> pd.DataFra
         mrow = m_norm.loc[mi]
         crow = c_norm.loc[ci]
 
-        # Guard: geo must align
         if not _require_geo_same(mrow, crow):
             continue
-        # Guard: same month (already in block, but re-check if any empty)
         if not _same_month(mrow, crow):
             continue
-
-        # Require exact stem equality (already in block), else skip
         if m_stem.loc[mi] == "" or c_stem.loc[ci] == "" or m_stem.loc[mi] != c_stem.loc[ci]:
             continue
 
-        # Start score
         score = 100
         notes = []
 
-        # Street type penalty (if different)
         st_pen, st_note = _compare_street_type(m_type.loc[mi], c_type.loc[ci])
-        if st_pen != 0:
+        if st_pen:
             score += st_pen
-            if st_note:
-                notes.append(st_note)
+            if st_note: notes.append(st_note)
 
-        # Unit penalty
         u_pen, u_note = _compare_unit(mrow.get("address2"), crow.get("crm_address2"))
-        if u_pen != 0:
+        if u_pen:
             score += u_pen
-            if u_note:
-                notes.append(u_note)
+            if u_note: notes.append(u_note)
 
-        # Clamp 0..100
         score = max(0, min(100, score))
         bucket = _confidence_bucket(score)
-
-        # Build friendly notes (replace 'none' only in notes; never modify source data)
         match_notes = _join_notes(*notes)
 
         out_rows.append({
@@ -292,16 +250,24 @@ def match_mail_to_crm(mail_df: pd.DataFrame, crm_df: pd.DataFrame) -> pd.DataFra
             "confidence": int(score),
             "bucket": bucket,
             "match_notes": match_notes,
-            # pass through a few useful columns for downstream / display
+
             "mail_date": mrow.get("mail_date"),
             "crm_job_date": crow.get("crm_job_date"),
+
             "city": mrow.get("city"),
             "state": mrow.get("state"),
             "zip": mrow.get("zip"),
+
             "address1": mrow.get("address1"),
             "address2": mrow.get("address2"),
+
             "crm_address1": crow.get("crm_address1"),
             "crm_address2": crow.get("crm_address2"),
+
+            # added for dashboard group-bys
+            "crm_city": crow.get("crm_city"),
+            "crm_state": crow.get("crm_state"),
+            "crm_zip": crow.get("crm_zip"),
         })
 
     return pd.DataFrame(out_rows)
@@ -312,11 +278,7 @@ def match_mail_to_crm(mail_df: pd.DataFrame, crm_df: pd.DataFrame) -> pd.DataFra
 def dedup_exact_address_date(df: pd.DataFrame,
                              addr_col: str,
                              date_col: str) -> pd.DataFrame:
-    """
-    Exact dedup on (normalized address1 stem, YYYY-MM-DD date string).
-    Use separately per source type (mail vs crm) before merging into MASTER.
-    """
-    # normalize address to stem + keep original date string as-is
+    """Exact dedup on (normalized address1 stem, YYYY-MM-DD date string)."""
     stem = df[addr_col].map(lambda a: normalize_address1(a)["stem"])
     key = stem.astype(str) + "||" + df[date_col].astype(str)
     keep = ~key.duplicated(keep="first")
