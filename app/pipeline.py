@@ -3,7 +3,13 @@
 
 import pandas as pd
 from typing import Dict
-from .matching_logic_v17 import match_mail_to_crm
+
+# Robust import that works whether loaded as a package or via wsgi bootstrap
+try:
+    from app.matching_logic_v17 import match_mail_to_crm  # absolute
+except Exception:
+    from .matching_logic_v17 import match_mail_to_crm      # relative
+
 
 # --- alias maps so we can accept many header variants from users ---
 MAIL_ALIASES: Dict[str, str] = {
@@ -76,8 +82,7 @@ def run_pipeline(mail_csv_path: str, crm_csv_path: str) -> pd.DataFrame:
 
     matches = match_mail_to_crm(mail_std, crm_std)
 
-    # Attach original indices (useful for dashboard/export)
-    # If the upstream wants IDs, we’ll try to include if present
+    # Attach original IDs if present
     mail_id_col = _find_col(mail_raw, "MailID", "ID", "Mail Id")
     crm_id_col  = _find_col(crm_raw, "CustomerID", "ID", "Cust Id")
 
