@@ -2,7 +2,7 @@ import os, io, tempfile, traceback
 from flask import Flask, render_template, request, redirect, url_for, send_file, flash, session
 import pandas as pd
 
-# Your v17 logic/plumbing
+# v17 logic
 from app.pipeline import run_pipeline
 from app.dashboard_export import finalize_summary_for_export_v17, render_full_dashboard_v17
 
@@ -13,7 +13,7 @@ app.config["MAX_CONTENT_LENGTH"] = 200 * 1024 * 1024  # 200MB
 @app.errorhandler(Exception)
 def handle_exception(e):
     tb = traceback.format_exc()
-    print("ERROR:", tb)  # shows up in Render logs
+    print("ERROR:", tb)  # shows in Render logs
     return f"Something went wrong: {e}", 500
 
 @app.route("/healthz")
@@ -32,23 +32,22 @@ def run():
         flash("Please upload both CSV files.")
         return redirect(url_for("index"))
 
-    # Save uploads to temp files (pipeline expects file paths)
+    # Save uploads to temp paths (pipeline expects file paths)
     with tempfile.NamedTemporaryFile(delete=False, suffix=".csv") as mf, \
          tempfile.NamedTemporaryFile(delete=False, suffix=".csv") as cf:
         mf.write(mail_file.read())
         cf.write(crm_file.read())
         mf_path, cf_path = mf.name, cf.name
 
-    # Run matcher pipeline → returns matches dataframe
+    # Run matcher
     summary = run_pipeline(mf_path, cf_path)
     summary_v17 = finalize_summary_for_export_v17(summary)
 
-    # Read full MAIL file (for KPIs that need the entire mail history)
+    # Read full mail file for KPIs that need the entire mail history
     mail_all_df = pd.read_csv(mf_path, dtype=str, keep_default_na=False)
     mail_count_total = len(mail_all_df)
 
-    # Render dashboard HTML — now we also pass the full mail df
-    # so the renderer can compute "Avg. Mailers Before First Response"
+    # Render dashboard (PASS mail_all_df — this version supports it)
     html = render_full_dashboard_v17(
         summary_v17,
         mail_count_total,
@@ -58,9 +57,8 @@ def run():
     # Persist export CSV for /download
     csv_bytes = summary_v17.to_csv(index=False).encode("utf-8")
     session["export_csv"] = csv_bytes.decode("utf-8")
-    csv_len = len(csv_bytes)
 
-    return render_template("result.html", dashboard_html=html, csv_len=csv_len)
+    return render_template("result.html", dashboard_html=html, csv_len=len(csv_bytes))
 
 @app.route("/download", methods=["POST"])
 def download():
