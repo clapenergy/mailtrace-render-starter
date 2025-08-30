@@ -1,6 +1,7 @@
 # app/dashboard_export.py
-# Dashboard-v4.1 — adds color-coded confidence in the summary table.
-# Also keeps the Dashboard-v3 fixes (address rescue, KPIs, Top 5 lists with scroll, monthly chart).
+# Dashboard-v4.3 — adds a leftmost "Mail Dates" column (from mail_dates_in_window).
+# Keeps prior features: address rescue, KPIs, Top 5 lists with scroll, horizontal month chart,
+# and color-coded confidence.
 
 from __future__ import annotations
 import io, base64, html, re
@@ -147,16 +148,20 @@ def finalize_summary_for_export_v17(df: pd.DataFrame) -> pd.DataFrame:
         "crmdate": "crm_job_date", "job_date": "crm_job_date",
         "amount": "crm_amount", "value": "crm_amount",
         "confidence_percent": "confidence",
+        # allow passthrough of prior-constructed dates list if named slightly differently
+        "mail_dates": "mail_dates_in_window",
     }
     for k, v in rename_map.items():
         if k in d.columns and v not in d.columns:
             d.rename(columns={k: v}, inplace=True)
 
+    # Ensure expected columns exist
     for col in [
         "crm_job_date","crm_amount",
         "address1","address2","city","state","zip",
         "crm_address1","crm_address2","crm_city","crm_state","crm_zip",
-        "confidence","match_notes","mail_count_in_window","mail_date"
+        "confidence","match_notes","mail_count_in_window","mail_date",
+        "mail_dates_in_window"
     ]:
         if col not in d.columns:
             d[col] = ""
@@ -177,6 +182,16 @@ def finalize_summary_for_export_v17(df: pd.DataFrame) -> pd.DataFrame:
             return x
         return x.replace("NaN", "none").replace("nan", "none")
     d["match_notes"] = d["match_notes"].map(_fix_notes)
+
+    # Normalize the mail dates list to a compact, safe string
+    def _fmt_mail_dates(s):
+        if s is None: return ""
+        txt = str(s).strip()
+        if not txt: return ""
+        # collapse spaces after commas
+        txt = re.sub(r"\s*,\s*", ", ", txt)
+        return txt
+    d["mail_dates_in_window"] = d["mail_dates_in_window"].map(_fmt_mail_dates)
 
     return d
 
@@ -272,13 +287,15 @@ def render_full_dashboard_v17(summary_df: pd.DataFrame,
       .kvlist { list-style:none; margin:0; padding:0; }
       .kvlist li { display:flex; align-items:center; justify-content:space-between; padding:8px 0; border-bottom:1px solid #f1f5f9; font-weight:600; }
       .scroll { max-height:220px; overflow-y:auto; padding-right:6px; }
-      table { width:100%; border-collapse: collapse; background:#fff; border:1px solid var(--border); border-radius:12px; overflow:hidden; margin-top:16px; }
-      th, td { text-align:left; padding:12px 14px; border-bottom:1px solid #f3f4f6; font-size:14px; vertical-align: top; }
+      table { width:100%; border-collapse: collapse; background:#fff; border:1px solid var(--border); border-radius:12px; overflow:hidden; margin-top:16px; table-layout: fixed; }
+      th, td { text-align:left; padding:12px 14px; border-bottom:1px solid #f3f4f6; font-size:14px; vertical-align: top; word-wrap: break-word; }
       th { background:#f8fafc; }
       h2 { margin: 20px 0 8px; }
       .conf-high { color:#15803d; font-weight:800; }  /* green */
       .conf-mid  { color:#b45309; font-weight:800; }  /* orange */
       .conf-low  { color:#b91c1c; font-weight:800; }  /* red */
+      /* Give mail-dates a reasonable width */
+      th.col-maildates, td.col-maildates { width: 180px; }
     </style>
     """
 
@@ -330,11 +347,12 @@ def render_full_dashboard_v17(summary_df: pd.DataFrame,
     d["_sort_dt"] = d["_crm_dt"].fillna(d["_mail_dt"])
     d = d.sort_values("_sort_dt", ascending=False)
 
-    # Table
+    # Table (add Mail Dates far-left)
     head = """
       <table>
         <thead>
           <tr>
+            <th class="col-maildates">Mail Dates</th>
             <th>CRM Date</th>
             <th>Amount</th>
             <th>Mail Address</th>
@@ -358,8 +376,10 @@ def render_full_dashboard_v17(summary_df: pd.DataFrame,
             r.get("crm_city",""), r.get("crm_state",""), r.get("crm_zip","")
         )
         conf_html = _conf_span(r.get("confidence", ""))
+        mail_dates = r.get("mail_dates_in_window", "")
         rows_html.append(f"""
           <tr>
+            <td class="col-maildates">{_esc(mail_dates)}</td>
             <td>{_esc(r.get('crm_job_date',''))}</td>
             <td>{_esc(r.get('crm_amount',''))}</td>
             <td>{_esc(mail_addr)}</td>
