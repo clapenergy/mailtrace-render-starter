@@ -33,26 +33,26 @@ def _split_unit_from_line(addr1: str) -> Tuple[str, str]:
     u1 = (m.group(2) or "").strip()
     u2 = (m.group(3) or "").strip()
     if kind:
-        unit = f"{kind.title()} {u1}".replace("Ste", "Ste").replace("Suite", "Suite")
+        unit = f"{kind.title()} {u1}"
     else:
         unit = f"#{u2}"
     street = s[: m.start()].rstrip(" ,.-")
+    # normalize common labels
     unit_norm = (
         unit.replace("Apartment", "Apt")
-        .replace("Aptartment", "Apt")
-        .replace("Suite", "Suite")
-        .replace("Ste", "Ste")
-        .replace("Unit", "Unit")
-        .replace("Floor", "Fl")
-        .replace("Bldg", "Bldg")
+            .replace("Aptartment", "Apt")
+            .replace("Suite", "Suite")
+            .replace("Ste", "Ste")
+            .replace("Unit", "Unit")
+            .replace("Floor", "Fl")
+            .replace("Bldg", "Bldg")
     )
     return street, unit_norm
 
 def _format_addr_with_unit(addr1: str, addr2: str) -> str:
     """
-    Build '123 Main St, Apt 2' (if we have a unit).
-    - If addr2 provided, use that as unit.
-    - Else try to peel unit off addr1 tail.
+    '123 Main St, Apt 2' if there's a unit; otherwise just the street.
+    If addr2 exists, we treat that as the unit. Otherwise we try to peel a unit off addr1 tail.
     """
     a1 = (addr1 or "").strip()
     a2 = (addr2 or "").strip()
@@ -62,7 +62,7 @@ def _format_addr_with_unit(addr1: str, addr2: str) -> str:
     else:
         street, unit = _split_unit_from_line(a1)
         if not unit:
-            return a1  # nothing to append
+            return a1
     return f"{street}, {unit}".strip(", ").strip()
 
 def _format_city_state_zip(city: str, state: str, zipc: str) -> str:
@@ -99,7 +99,7 @@ def finalize_summary_for_export_v17(df: pd.DataFrame, **_ignore) -> pd.DataFrame
         if col not in d.columns:
             d[col] = ""
 
-    # Parse date to sortable key; keep original text for display
+    # Parse CRM date into sortable key; keep original text for display
     def _to_sortable_date(s):
         if not isinstance(s, str):
             return pd.NaT
@@ -116,7 +116,7 @@ def finalize_summary_for_export_v17(df: pd.DataFrame, **_ignore) -> pd.DataFrame
 
     d["_crm_dt"] = d["crm_job_date"].map(_to_sortable_date)
 
-    # Build display strings with unit logic
+    # Build display strings with unit logic (mail + CRM sides)
     d["_mail_addr_disp"] = d.apply(
         lambda r: _format_addr_with_unit(r.get("address1",""), r.get("address2","")),
         axis=1
@@ -135,12 +135,71 @@ def finalize_summary_for_export_v17(df: pd.DataFrame, **_ignore) -> pd.DataFrame
     )
 
     # Normalized fields for robust groupings
-    d["_crm_city_norm"] = d["crm_city"].astype(str).str.strip().str.rstrip(".")
+    d["_crm_city_norm"]  = d["crm_city"].astype(str).str.strip().str.rstrip(".")
     d["_crm_state_norm"] = d["crm_state"].astype(str).str.strip().str.upper()
 
     # Sort newest CRM date first
     d = d.sort_values(by=["_crm_dt"], ascending=[False], na_position="last").reset_index(drop=True)
     return d
+
+# ---------- inline SVG chart ----------
+def _svg_month_barchart(monthly_df: pd.DataFrame) -> str:
+    """
+    Render a clean, self-contained horizontal bar chart using inline SVG.
+    monthly_df has columns ["month" (Timestamp month start), "matches" (int)] sorted chronologically.
+    """
+    if monthly_df.empty:
+        return '<div class="note">No dated matches</div>'
+
+    # Chart geometry
+    width = 700
+    left_pad = 100
+    right_pad = 40
+    bar_height = 16
+    v_gap = 10
+
+    n = len(monthly_df)
+    height = n * (bar_height + v_gap) + 20
+
+    maxv = int(monthly_df["matches"].max()) if n else 0
+    if maxv <= 0:
+        maxv = 1
+
+    # build bars
+    y = 10
+    rows = []
+    for _, r in monthly_df.iterrows():
+        label = r["month"].strftime("%Y-%m")
+        v = int(r["matches"])
+        # bar width scaled to drawable width
+        drawable = width - left_pad - right_pad
+        w = int((v / maxv) * drawable)
+        # Row group
+        rows.append(f"""
+          <g>
+            <text x="{left_pad-10}" y="{y+bar_height-4}" text-anchor="end" class="m-label">{esc(label)}</text>
+            <rect x="{left_pad}" y="{y}" width="{w}" height="{bar_height}" rx="4" ry="4" class="m-bar" />
+            <text x="{left_pad + w + 6}" y="{y+bar_height-4}" class="m-value">{v}</text>
+          </g>
+        """)
+        y += bar_height + v_gap
+
+    svg = f"""
+    <svg viewBox="0 0 {width} {height}" width="100%" height="{height}">
+      <style>
+        .m-label {{ fill:#64748b; font: 12px/1.2 system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }}
+        .m-value {{ fill:#0c2d4e; font: 12px/1.2 system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; font-weight: 800; }}
+        .m-bar {{ fill:#b7cadc; }}
+        @media (prefers-color-scheme: dark) {{
+          .m-label {{ fill:#94a3b8; }}
+          .m-value {{ fill:#cbd5e1; }}
+          .m-bar {{ fill:#375a7c; }}
+        }}
+      </style>
+      {''.join(rows)}
+    </svg>
+    """
+    return svg
 
 # ---------- public: render html dashboard ----------
 def render_full_dashboard_v17(
@@ -169,7 +228,7 @@ def render_full_dashboard_v17(
           .size().reset_index(name="matches")
           .rename(columns={"_crm_city_norm":"city","_crm_state_norm":"state"})
           .sort_values(["matches","city","state"], ascending=[False, True, True])
-          .head(50)  # keep up to 50, we’ll show 5 with a scrollbar
+          .head(50)  # keep up to 50; we'll show 5 with scrollbar
     )
     zip_counts = (
         d.groupby(["crm_zip"], dropna=False)
@@ -179,7 +238,7 @@ def render_full_dashboard_v17(
           .head(50)
     )
 
-    # ---- Monthly matches (chronological) ----
+    # ---- Monthly matches (chronological) → SVG chart ----
     dm = d.dropna(subset=["_crm_dt"]).copy()
     if not dm.empty:
         dm["month"] = dm["_crm_dt"].dt.to_period("M").dt.to_timestamp()
@@ -190,33 +249,26 @@ def render_full_dashboard_v17(
     else:
         monthly = pd.DataFrame(columns=["month","matches"])
 
-    # ----- Layout CSS (inline so you don't have to touch style.css) -----
+    month_svg = _svg_month_barchart(monthly)
+
+    # ----- Layout CSS (inline) -----
     styles = """
     <style>
-      /* KPI row */
       .kpi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap:16px; }
-
-      /* Analytics row: chart wide left, two stacked cards right */
       .analytics-grid {
         display: grid;
         grid-template-columns: 2fr 1fr;
-        grid-template-areas:
-          "chart side";
+        grid-template-areas: "chart side";
         gap:16px;
       }
       .analytics-chart { grid-area: chart; display:flex; flex-direction:column; gap:10px; }
       .analytics-side { grid-area: side; display:grid; grid-template-rows: auto auto; gap:16px; }
-
       @media (max-width: 900px) {
         .analytics-grid {
           grid-template-columns: 1fr;
-          grid-template-areas:
-            "chart"
-            "side";
+          grid-template-areas: "chart" "side";
         }
       }
-
-      /* Scrollable lists show ~5 items */
       .kvlist { list-style:none; margin:0; padding:0; }
       .kvlist li {
         display:flex; align-items:center; justify-content:space-between;
@@ -235,7 +287,7 @@ def render_full_dashboard_v17(
     </div>
     """
 
-    # Top cities/zips lists (scrollable)
+    # Top cities/zips (scrollable, ~5 visible)
     def _city_list(df):
         items = []
         for _, r in df.iterrows():
@@ -255,32 +307,11 @@ def render_full_dashboard_v17(
             items = ["<li><span>—</span><strong>0</strong></li>"]
         return "<ul class='kvlist'>" + "".join(items) + "</ul>"
 
-    # Monthly mini bars (chronological)
-    bars = []
-    if not monthly.empty:
-        maxv = int(monthly["matches"].max())
-        for _, r in monthly.iterrows():
-            m = r["month"].strftime("%Y-%m")
-            v = int(r["matches"])
-            w = int((v / maxv) * 100) if maxv > 0 else 0
-            bars.append(f"""
-              <div style="display:flex; align-items:center; gap:10px;">
-                <div style="width:90px; color:#64748b; font-weight:700">{esc(m)}</div>
-                <div style="flex:1; background:#eef2f7; border-radius:999px; overflow:hidden;">
-                  <div style="width:{w}%; height:10px;"></div>
-                </div>
-                <div style="width:50px; text-align:right; font-weight:800">{v}</div>
-              </div>
-            """)
-
-    # Assemble analytics row (chart left, lists right)
     analytics_html = f"""
     <div class="analytics-grid">
       <div class="card analytics-chart">
         <div class="k">Matched jobs by month</div>
-        <div style="display:flex; flex-direction:column; gap:8px; margin-top:10px;">
-          {''.join(bars) if bars else '<div class="note">No dated matches</div>'}
-        </div>
+        <div style="margin-top:8px">{month_svg}</div>
       </div>
       <div class="analytics-side">
         <div class="card">
@@ -329,7 +360,7 @@ def render_full_dashboard_v17(
 
     table_html = head + "\n".join(rows_html) + "\n</tbody></table>"
 
-    # Put it all together
+    # Final page
     html_out = (
         styles
         + kpi_html
