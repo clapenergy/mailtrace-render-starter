@@ -37,7 +37,6 @@ def _split_unit_from_line(addr1: str) -> Tuple[str, str]:
     else:
         unit = f"#{u2}"
     street = s[: m.start()].rstrip(" ,.-")
-    # Normalize casing for common unit kinds
     unit_norm = (
         unit.replace("Apartment", "Apt")
         .replace("Aptartment", "Apt")
@@ -135,6 +134,10 @@ def finalize_summary_for_export_v17(df: pd.DataFrame, **_ignore) -> pd.DataFrame
         axis=1
     )
 
+    # Add normalized city/state for robust counts (strip trailing periods/whitespace)
+    d["_crm_city_norm"] = d["crm_city"].astype(str).str.strip().str.rstrip(".")
+    d["_crm_state_norm"] = d["crm_state"].astype(str).str.strip().str.upper()
+
     # Sort newest CRM date first
     d = d.sort_values(by=["_crm_dt"], ascending=[False], na_position="last").reset_index(drop=True)
     return d
@@ -160,27 +163,33 @@ def render_full_dashboard_v17(
             return 0.0
     total_revenue = d["crm_amount"].map(_to_float).sum()
 
-    # Top cities/zips (CRM side)
+    # ---- Top cities/zips (robust) ----
+    # count by normalized city/state
     city_counts = (
-        d.groupby(["crm_city","crm_state"], dropna=False)
+        d.groupby(["_crm_city_norm","_crm_state_norm"], dropna=False)
           .size().reset_index(name="matches")
-          .sort_values("matches", ascending=False)
-          .head(6)
+          .rename(columns={"_crm_city_norm":"city","_crm_state_norm":"state"})
+          .sort_values(["matches","city","state"], ascending=[False, True, True])
+          .head(50)  # keep up to 50, we'll show 5 with a scrollbar
     )
     zip_counts = (
         d.groupby(["crm_zip"], dropna=False)
           .size().reset_index(name="matches")
-          .sort_values("matches", ascending=False)
-          .head(6)
+          .rename(columns={"crm_zip":"zip"})
+          .sort_values(["matches","zip"], ascending=[False, True])
+          .head(50)
     )
 
-    # Monthly matches (by CRM job month)
+    # ---- Monthly matches (by CRM job month, chronological) ----
     dm = d.dropna(subset=["_crm_dt"]).copy()
-    dm["month"] = dm["_crm_dt"].dt.to_period("M").astype(str)
-    monthly = (
-        dm.groupby("month").size().reset_index(name="matches")
-          .sort_values("month")
-    )
+    if not dm.empty:
+        dm["month"] = dm["_crm_dt"].dt.to_period("M").dt.to_timestamp()  # month start
+        monthly = (
+            dm.groupby("month").size().reset_index(name="matches")
+              .sort_values("month")
+        )
+    else:
+        monthly = pd.DataFrame(columns=["month","matches"])
 
     # KPI HTML
     kpi_html = f"""
@@ -191,48 +200,68 @@ def render_full_dashboard_v17(
     </div>
     """
 
-    # Top cities/zips HTML
-    def _bullets_city(df):
-        out = []
+    # Top cities/zips HTML — scrollable, only 5 visible
+    def _city_list(df):
+        items = []
         for _, r in df.iterrows():
-            city = (r["crm_city"] or "").rstrip(".")
-            state = r["crm_state"] or ""
-            out.append(f"{esc(city)}, {esc(state)}: {int(r['matches'])}")
-        return " &nbsp; ".join(out) if out else "—"
+            city = (r["city"] or "")
+            state = r["state"] or ""
+            items.append(f"<li><span>{esc(city)}, {esc(state)}</span><strong>{int(r['matches'])}</strong></li>")
+        if not items:
+            items = ["<li><span>—</span><strong>0</strong></li>"]
+        return "<ul class='kvlist'>" + "".join(items) + "</ul>"
 
-    def _bullets_zip(df):
-        out = [f"{esc(str(r['crm_zip']))}: {int(r['matches'])}" for _, r in df.iterrows()]
-        return " &nbsp; ".join(out) if out else "—"
+    def _zip_list(df):
+        items = []
+        for _, r in df.iterrows():
+            z = str(r["zip"]) if r["zip"] is not None else ""
+            items.append(f"<li><span>{esc(z)}</span><strong>{int(r['matches'])}</strong></li>")
+        if not items:
+            items = ["<li><span>—</span><strong>0</strong></li>"]
+        return "<ul class='kvlist'>" + "".join(items) + "</ul>"
 
     top_html = f"""
+    <style>
+      .kvlist {{ list-style:none; margin:0; padding:0; }}
+      .kvlist li {{
+        display:flex; align-items:center; justify-content:space-between;
+        padding:8px 0; border-bottom:1px solid #f1f5f9; font-weight:600;
+      }}
+      .scrollbox {{
+        max-height: 220px;   /* ~5 rows visible */
+        overflow-y: auto;
+        padding-right: 6px;
+      }}
+    </style>
     <div class="grid">
       <div class="card">
         <div class="k">Top Cities</div>
-        <div class="v" style="font-size:16px; font-weight:600">{_bullets_city(city_counts)}</div>
+        <div class="scrollbox">{_city_list(city_counts)}</div>
       </div>
       <div class="card">
         <div class="k">Top ZIPs</div>
-        <div class="v" style="font-size:16px; font-weight:600">{_bullets_zip(zip_counts)}</div>
+        <div class="scrollbox">{_zip_list(zip_counts)}</div>
       </div>
     </div>
     """
 
-    # Monthly mini bars
+    # Monthly mini bars (chronological)
     bars = []
-    maxv = int(monthly["matches"].max()) if not monthly.empty else 0
-    for _, r in monthly.iterrows():
-        m = esc(r["month"])
-        v = int(r["matches"])
-        w = int((v / maxv) * 100) if maxv > 0 else 0
-        bars.append(f"""
-          <div style="display:flex; align-items:center; gap:10px;">
-            <div style="width:90px; color:#64748b; font-weight:700">{m}</div>
-            <div style="flex:1; background:#eef2f7; border-radius:999px; overflow:hidden;">
-              <div style="width:{w}%; height:10px;"></div>
-            </div>
-            <div style="width:50px; text-align:right; font-weight:800">{v}</div>
-          </div>
-        """)
+    if not monthly.empty:
+        maxv = int(monthly["matches"].max())
+        for _, r in monthly.iterrows():
+            m = r["month"].strftime("%Y-%m")
+            v = int(r["matches"])
+            w = int((v / maxv) * 100) if maxv > 0 else 0
+            bars.append(f"""
+              <div style="display:flex; align-items:center; gap:10px;">
+                <div style="width:90px; color:#64748b; font-weight:700">{esc(m)}</div>
+                <div style="flex:1; background:#eef2f7; border-radius:999px; overflow:hidden;">
+                  <div style="width:{w}%; height:10px;"></div>
+                </div>
+                <div style="width:50px; text-align:right; font-weight:800">{v}</div>
+              </div>
+            """)
     month_html = f"""
       <div class="card">
         <div class="k">Matched jobs by month</div>
