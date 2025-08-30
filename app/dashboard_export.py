@@ -1,367 +1,291 @@
-# app/dashboard_export.py — KPIs + Top Cities/Zips + Month Chart + Date/Amount table
-# Optimized "Avg. Mailers Before First Response" (vectorized per-stem date arrays + searchsorted).
-
-from html import escape
+# app/dashboard_export.py
+from __future__ import annotations
+import html
 import io
-import base64
+import math
 import re
+from datetime import datetime
+from typing import Tuple
+
 import pandas as pd
-import numpy as np
 
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-
-# Pull normalize_address1 from matching core
-try:
-    from app.matching_logic_v17 import normalize_address1
-except Exception:
-    from .matching_logic_v17 import normalize_address1
-
-EXPECTED_COLS = [
-    "confidence", "bucket", "match_notes",
-    "mail_date", "crm_job_date",
-    "city", "state", "zip", "address1", "address2",
-    "crm_address1", "crm_address2", "crm_city", "crm_state", "crm_zip",
-    "crm_amount",
-    "MailID", "CustomerID",
-]
-
-_CURRENCY_KEEP = re.compile(r"[^0-9\.\-]")  # keep digits/.-
-
-def _parse_amount_series(s: pd.Series) -> pd.Series:
-    if s is None or len(s) == 0:
-        return pd.Series([], dtype=float)
-    x = s.astype(str).map(lambda v: _CURRENCY_KEEP.sub("", v or ""))
-    return pd.to_numeric(x, errors="coerce").fillna(0.0)
-
-def _fmt_currency(x) -> str:
-    try:
-        val = float(str(x).replace(",", ""))
-    except Exception:
+# ---------- helpers: safe html ----------
+def esc(s) -> str:
+    if s is None:
         return ""
-    return f"${val:,.2f}"
+    return html.escape(str(s))
 
+# ---------- unit parsing/formatting ----------
+_UNIT_PAT = re.compile(
+    r"(?:^|[\s,.-])(?:(apt|apartment|suite|ste|unit|bldg|fl|floor)\s*#?\s*([\w-]+)|#\s*([\w-]+))\s*$",
+    re.IGNORECASE,
+)
+
+def _split_unit_from_line(addr1: str) -> Tuple[str, str]:
+    """
+    If addr1 ends with a unit indicator, split it off.
+    Returns (street_part, unit_part) where unit_part like 'Apt 2' or 'Ste 200'.
+    If no unit present, returns (addr1, '').
+    """
+    s = (addr1 or "").strip()
+    if not s:
+        return "", ""
+    m = _UNIT_PAT.search(s)
+    if not m:
+        return s, ""
+    kind = (m.group(1) or "").strip()
+    u1 = (m.group(2) or "").strip()
+    u2 = (m.group(3) or "").strip()
+    if kind:
+        unit = f"{kind.title()} {u1}".replace("Ste", "Ste").replace("Suite", "Suite")
+    else:
+        unit = f"#{u2}"
+    street = s[: m.start()].rstrip(" ,.-")
+    # Normalize casing for common unit kinds
+    unit_norm = (
+        unit.replace("Apartment", "Apt")
+        .replace("Aptartment", "Apt")
+        .replace("Suite", "Suite")
+        .replace("Ste", "Ste")
+        .replace("Unit", "Unit")
+        .replace("Floor", "Fl")
+        .replace("Bldg", "Bldg")
+    )
+    return street, unit_norm
+
+def _format_addr_with_unit(addr1: str, addr2: str) -> str:
+    """
+    Build '123 Main St, Apt 2' (if we have a unit).
+    - If addr2 provided, use that as unit.
+    - Else try to peel unit off addr1 tail.
+    """
+    a1 = (addr1 or "").strip()
+    a2 = (addr2 or "").strip()
+    if a2:
+        street, _inline_unit = _split_unit_from_line(a1)
+        unit = a2
+    else:
+        street, unit = _split_unit_from_line(a1)
+        if not unit:
+            return a1  # nothing to append
+    return f"{street}, {unit}".strip(", ").strip()
+
+def _format_city_state_zip(city: str, state: str, zipc: str) -> str:
+    city = (city or "").strip().rstrip(".")
+    state = (state or "").strip().upper()
+    zipc = (zipc or "").strip()
+    if city and state:
+        return f"{city}, {state} {zipc}".strip()
+    if city:
+        return f"{city} {zipc}".strip()
+    if state:
+        return f"{state} {zipc}".strip()
+    return zipc
+
+# ---------- public: finalize for export ----------
 def finalize_summary_for_export_v17(df: pd.DataFrame) -> pd.DataFrame:
-    if df is None or len(getattr(df, "columns", [])) == 0:
-        out = pd.DataFrame(columns=EXPECTED_COLS)
-        out["confidence"] = pd.Series(dtype="int64")
-        out["confidence_pct"] = ""
-        out["crm_amount"] = ""
-        return out
+    """
+    Normalize/prepare the summary dataframe for export and display.
+    Expected incoming columns include:
+      - crm_job_date, crm_amount, crm_address1, crm_address2, crm_city, crm_state, crm_zip
+      - address1, address2, city, state, zip
+      - confidence, match_notes
+    """
+    d = df.copy()
 
-    out = df.copy()
-    for col in EXPECTED_COLS:
-        if col not in out.columns:
-            out[col] = ""
+    # Ensure presence of columns
+    for col in [
+        "crm_job_date","crm_amount",
+        "crm_address1","crm_address2","crm_city","crm_state","crm_zip",
+        "address1","address2","city","state","zip",
+        "confidence","match_notes"
+    ]:
+        if col not in d.columns:
+            d[col] = ""
 
-    # confidence
-    try:
-        out["confidence"] = pd.to_numeric(out["confidence"], errors="coerce").fillna(0).astype(int)
-    except Exception:
-        out["confidence"] = 0
-    out["confidence_pct"] = out["confidence"].astype(str) + "%"
+    # Parse date to sortable key; keep original text for display
+    def _to_sortable_date(s):
+        if not isinstance(s, str):
+            return pd.NaT
+        z = s.strip()
+        if not z:
+            return pd.NaT
+        for fmt in ("%Y-%m-%d","%m/%d/%Y","%Y/%m/%d","%m-%d-%Y","%d-%m-%y","%d-%m-%Y"):
+            try:
+                return pd.to_datetime(z, format=fmt, errors="raise")
+            except Exception:
+                continue
+        # fuzzy fallback
+        return pd.to_datetime(z, errors="coerce")
 
-    # notes cleanup
-    out["match_notes"] = out.get("match_notes", "").fillna("").astype(str).replace({"NaN": "none", "nan": "none"})
+    d["_crm_dt"] = d["crm_job_date"].map(_to_sortable_date)
 
-    # safe strings
-    for col in ["address1", "city", "state", "zip", "crm_address1", "crm_city", "crm_state", "crm_zip"]:
-        out[col] = out[col].fillna("").astype(str)
-
-    out["crm_amount"] = out.get("crm_amount", "").fillna("").astype(str)
-    for col in ["mail_date", "crm_job_date"]:
-        out[col] = out.get(col, "").astype(str).fillna("")
-
-    return out
-
-def _kpi(label: str, value) -> str:
-    return f"""
-    <div class="card kpi">
-      <div class="k">{escape(label)}</div>
-      <div class="v">{escape(str(value))}</div>
-    </div>"""
-
-def _pct(n, d) -> str:
-    if not d or d == 0:
-        return "0%"
-    return f"{round(100.0 * (float(n) / float(d)))}%"
-
-def _top_cities(df: pd.DataFrame, k: int = 10) -> pd.DataFrame:
-    if df is None or df.empty:
-        return pd.DataFrame(columns=["city", "state", "matches"])
-    use_crm = {"crm_city", "crm_state"}.issubset(df.columns)
-    ccol = "crm_city" if use_crm else "city"
-    scol = "crm_state" if use_crm else "state"
-    tmp = df[[ccol, scol]].copy().fillna("").astype(str)
-    grp = (
-        tmp.groupby([ccol, scol], dropna=False)
-           .size()
-           .reset_index(name="matches")
-           .sort_values("matches", ascending=False)
-           .head(k)
-           .rename(columns={ccol: "city", scol: "state"})
+    # Build display strings with unit logic
+    d["_mail_addr_disp"] = d.apply(
+        lambda r: _format_addr_with_unit(r.get("address1",""), r.get("address2","")),
+        axis=1
     )
-    return grp
-
-def _top_zips(df: pd.DataFrame, k: int = 10) -> pd.DataFrame:
-    if df is None or df.empty:
-        return pd.DataFrame(columns=["zip", "matches"])
-    zcol = "crm_zip" if "crm_zip" in df.columns else "zip"
-    z = df[[zcol]].copy().fillna("").astype(str)
-    z[zcol] = z[zcol].str[:5]
-    grp = (
-        z.groupby(zcol, dropna=False)
-         .size()
-         .reset_index(name="matches")
-         .sort_values("matches", ascending=False)
-         .head(k)
-         .rename(columns={zcol: "zip"})
+    d["_mail_city_disp"] = d.apply(
+        lambda r: _format_city_state_zip(r.get("city",""), r.get("state",""), r.get("zip","")),
+        axis=1
     )
-    return grp
-
-def _matches_by_month_chart_uri(df: pd.DataFrame) -> str:
-    if df is None or df.empty:
-        return ""
-    date_col = "crm_job_date" if "crm_job_date" in df.columns else "mail_date"
-    series = pd.to_datetime(df[date_col], errors="coerce", utc=False)
-    months = series.dropna().dt.to_period("M").astype(str)
-    if months.empty:
-        return ""
-    counts = (
-        months.value_counts()
-              .rename_axis("month")
-              .reset_index(name="matches")
-              .sort_values("month")
+    d["_crm_addr_disp"] = d.apply(
+        lambda r: _format_addr_with_unit(r.get("crm_address1",""), r.get("crm_address2","")),
+        axis=1
     )
-    fig, ax = plt.subplots(figsize=(8, 3))
-    ax.bar(counts["month"], counts["matches"])
-    ax.set_xlabel("Month")
-    ax.set_ylabel("Matches")
-    ax.set_title("Matched Jobs by Month")
-    ax.tick_params(axis='x', rotation=45)
-    fig.tight_layout()
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=150, bbox_inches="tight")
-    plt.close(fig)
-    buf.seek(0)
-    b64 = base64.b64encode(buf.read()).decode("ascii")
-    return f"data:image/png;base64,{b64}"
-
-# ---- Optimized KPI: Avg. Mailers Before First Response ----
-
-def _avg_mailers_before_first_response(matches_df: pd.DataFrame, mail_all_df: pd.DataFrame) -> float | None:
-    """
-    For each matched row, count how many mailers to the same normalized address stem
-    have mail_date strictly before that row's crm_job_date; average across matches.
-    Optimized using per-stem sorted numpy arrays + searchsorted (no Python loops over groups).
-    """
-    if matches_df is None or matches_df.empty or mail_all_df is None or mail_all_df.empty:
-        return None
-
-    mail_copy = mail_all_df.copy()
-
-    # address column in uploaded mail file
-    for candidate in ["Address1", "Address", "MailAddress1", "address1"]:
-        if candidate in mail_copy.columns:
-            mail_addr_col = candidate
-            break
-    else:
-        return None
-
-    # date column in uploaded mail file
-    for dcol in ["MailDate", "Mailed", "Date", "Mail Date", "mail_date"]:
-        if dcol in mail_copy.columns:
-            mail_date_col = dcol
-            break
-    else:
-        return None
-
-    # Build normalized stem + datetime for all mail
-    mail_copy["_stem"] = mail_copy[mail_addr_col].astype(str).map(lambda a: normalize_address1(a)["stem"])
-    mail_copy["_mail_dt"] = pd.to_datetime(mail_copy[mail_date_col], errors="coerce", utc=False)
-
-    # Drop bad rows and pack per-stem sorted arrays of datetimes
-    mc = mail_copy.dropna(subset=["_stem", "_mail_dt"]).copy()
-    if mc.empty:
-        return None
-
-    # Group once, then convert each group's dates to a sorted numpy array
-    stem_to_dates = {}
-    for stem, grp in mc.groupby("_stem", sort=False):
-        arr = np.sort(grp["_mail_dt"].to_numpy(dtype="datetime64[ns]"))
-        stem_to_dates[stem] = arr
-
-    # Prepare matches data (stems + crm datetimes)
-    mx = matches_df.copy()
-    mx["_stem"] = mx["address1"].astype(str).map(lambda a: normalize_address1(a)["stem"])
-    mx["_crm_dt"] = pd.to_datetime(mx["crm_job_date"], errors="coerce", utc=False)
-    mx = mx[(mx["_stem"].astype(str).str.len() > 0) & (mx["_crm_dt"].notna())]
-    if mx.empty:
-        return None
-
-    # Vectorized: for each match row, do a binary search on that stem's array to count
-    counts = []
-    for _, r in mx.iterrows():
-        stem = r["_stem"]
-        crm_dt = np.datetime64(r["_crm_dt"].to_datetime64())  # ensure numpy dtype
-        arr = stem_to_dates.get(stem)
-        if arr is None or arr.size == 0:
-            counts.append(0)
-        else:
-            # number of mail dates strictly before crm_dt
-            cnt = int(np.searchsorted(arr, crm_dt, side="left"))
-            counts.append(cnt)
-
-    if not counts:
-        return None
-
-    return round(float(np.mean(counts)), 2)
-
-def _mailers_per_match(total_mail: int, total_matches: int) -> float | str:
-    if not total_matches:
-        return "—"
-    return round(float(total_mail) / float(total_matches), 2)
-
-# ---- main renderer ----
-
-def render_full_dashboard_v17(
-    summary: pd.DataFrame,
-    mail_total: int,
-    *,
-    mail_all_df: pd.DataFrame | None = None
-) -> str:
-    """
-    KPIs → Top Cities → Top ZIPs → Matches by Month → Sample table
-    Sample table: CRM Date first; sorted by CRM date desc (fallback to mail date); Amount left; Confidence before Notes.
-    """
-    summary = summary.copy() if summary is not None else pd.DataFrame(columns=EXPECTED_COLS)
-    matches = len(summary)
-    match_rate = _pct(matches, mail_total)
-
-    # revenue
-    amt_series = _parse_amount_series(summary.get("crm_amount", pd.Series([], dtype=str)))
-    total_revenue = float(amt_series.sum()) if len(amt_series) else 0.0
-    total_rev_str = _fmt_currency(total_revenue)
-
-    # new KPIs
-    kpi_mailers_per_match = _mailers_per_match(mail_total, matches)
-    kpi_avg_before = _avg_mailers_before_first_response(summary, mail_all_df) if mail_all_df is not None else None
-    avg_before_str = f"{kpi_avg_before:.2f}" if isinstance(kpi_avg_before, float) else "—"
-
-    kpis_html = (
-        _kpi("Total Mail", mail_total) +
-        _kpi("Matches", matches) +
-        _kpi("Match Rate", match_rate) +
-        _kpi("Total Revenue Generated", total_rev_str) +
-        _kpi("Mailers per Match", kpi_mailers_per_match) +
-        _kpi("Avg. Mailers Before First Response", avg_before_str)
+    d["_crm_city_disp"] = d.apply(
+        lambda r: _format_city_state_zip(r.get("crm_city",""), r.get("crm_state",""), r.get("crm_zip","")),
+        axis=1
     )
 
-    # top cities
-    top_cities = _top_cities(summary, 10)
-    cities_rows = ""
-    if not top_cities.empty:
-        for _, r in top_cities.iterrows():
-            cities_rows += f"<tr><td>{escape(str(r['city']))}, {escape(str(r['state']))}</td><td>{int(r['matches'])}</td></tr>"
-    cities_card = f"""
-      <div class="card" style="margin-top:16px;">
-        <h3 style="margin-top:0;">Top Cities (matches)</h3>
-        <div style="overflow:auto;">
-          <table>
-            <thead><tr><th>City</th><th>Matches</th></tr></thead>
-            <tbody>{cities_rows or '<tr><td colspan="2">No city data.</td></tr>'}</tbody>
-          </table>
-        </div>
-      </div>
-    """
+    # Sort newest CRM date first, then fallback to mail city/zip alpha if tie
+    d = d.sort_values(by=["_crm_dt"], ascending=[False], na_position="last").reset_index(drop=True)
 
-    # top zips
-    top_zips = _top_zips(summary, 10)
-    zips_rows = ""
-    if not top_zips.empty:
-        for _, r in top_zips.iterrows():
-            zips_rows += f"<tr><td>{escape(str(r['zip']))}</td><td>{int(r['matches'])}</td></tr>"
-    zips_card = f"""
-      <div class="card" style="margin-top:16px;">
-        <h3 style="margin-top:0;">Top ZIP Codes (matches)</h3>
-        <div style="overflow:auto;">
-          <table>
-            <thead><tr><th>ZIP</th><th>Matches</th></tr></thead>
-            <tbody>{zips_rows or '<tr><td colspan="2">No ZIP data.</td></tr>'}</tbody>
-          </table>
-        </div>
-      </div>
-    """
+    return d
 
-    # month chart
-    chart_uri = _matches_by_month_chart_uri(summary)
-    month_card = f"""
-      <div class="card" style="margin-top:16px;">
-        <h3 style="margin-top:0;">Matched Jobs by Month</h3>
-        {"<img alt='Matches by month' src='" + chart_uri + "' style='max-width:100%; height:auto;'/>" if chart_uri else "<div class='note'>No date data available.</div>"}
-      </div>
-    """
+# ---------- public: render html dashboard ----------
+def render_full_dashboard_v17(summary_df: pd.DataFrame, mail_total_count: int | None = None) -> str:
+    d = summary_df.copy()
 
-    # sample table sorted by CRM date desc (fallback to mail date)
-    sort_series = pd.to_datetime(
-        summary["crm_job_date"].where(summary["crm_job_date"].astype(str).str.strip() != "", summary["mail_date"]),
-        errors="coerce",
-        utc=False
+    # KPIs
+    total_mail = mail_total_count if mail_total_count is not None else ""
+    total_matches = len(d)
+    # Total revenue (numeric sum of crm_amount where parsable)
+    def _to_float(x):
+        if x is None: return 0.0
+        s = str(x).strip().replace("$","").replace(",","")
+        try:
+            return float(s)
+        except Exception:
+            return 0.0
+    total_revenue = d["crm_amount"].map(_to_float).sum()
+
+    # Top cities/zips (from CRM side for consistency)
+    city_counts = (
+        d.groupby(["crm_city","crm_state"], dropna=False)
+          .size().reset_index(name="matches")
+          .sort_values("matches", ascending=False)
+          .head(6)
     )
-    work = summary.copy()
-    work["_sort_date"] = sort_series
-    work["_display_date"] = work["crm_job_date"].where(
-        work["crm_job_date"].astype(str).str.strip() != "", work["mail_date"]
-    ).astype(str)
-    work = work.sort_values("_sort_date", ascending=False, na_position="last")
+    zip_counts = (
+        d.groupby(["crm_zip"], dropna=False)
+          .size().reset_index(name="matches")
+          .sort_values("matches", ascending=False)
+          .head(6)
+    )
 
-    rows_html = []
-    for _, r in work.head(200).iterrows():
-        amt_disp = _fmt_currency(r.get("crm_amount", "")) if str(r.get("crm_amount", "")).strip() != "" else ""
-        crm_date = str(r.get("_display_date", "")).strip()
-        rows_html.append(f"""
-        <tr>
-          <td>{escape(crm_date)}</td>
-          <td>{escape(amt_disp)}</td>
-          <td>{escape(str(r.get('address1','')))}</td>
-          <td>{escape(str(r.get('city','')))}, {escape(str(r.get('state','')))} {escape(str(r.get('zip','')))}</td>
-          <td>{escape(str(r.get('crm_address1','')))}</td>
-          <td>{escape(str(r.get('crm_city','')))}, {escape(str(r.get('crm_state','')))} {escape(str(r.get('crm_zip','')))}</td>
-          <td>{escape(str(r.get('confidence','')))}%</td>
-          <td>{escape(str(r.get('match_notes','')))}</td>
-        </tr>""")
+    # Monthly matches (by CRM job month)
+    dm = d.dropna(subset=["_crm_dt"]).copy()
+    dm["month"] = dm["_crm_dt"].dt.to_period("M").astype(str)
+    monthly = (
+        dm.groupby("month").size().reset_index(name="matches")
+          .sort_values("month")
+    )
 
-    table_card = f"""
-      <div class="card" style="margin-top:16px;">
-        <h3 style="margin-top:0;">Sample of Matches</h3>
-        <div class="note">Sorted by most recent CRM date (falls back to mail date).</div>
-        <div style="overflow:auto;">
-          <table>
-            <thead>
-              <tr>
-                <th>CRM Date</th>
-                <th>Amount</th>
-                <th>Mail Address</th>
-                <th>Mail City/State/Zip</th>
-                <th>CRM Address</th>
-                <th>CRM City/State/Zip</th>
-                <th>Confidence</th>
-                <th>Notes</th>
-              </tr>
-            </thead>
-            <tbody>{''.join(rows_html) if rows_html else '<tr><td colspan="8">No matches yet.</td></tr>'}</tbody>
-          </table>
-        </div>
-      </div>
-    """
-
-    html = f"""
-    <div class="container">
-      <div class="grid">{kpis_html}</div>
-      <div class="grid">{cities_card}{zips_card}</div>
-      {month_card}
-      {table_card}
+    # Build KPI HTML
+    kpi_html = f"""
+    <div class="grid">
+      <div class="card kpi"><div class="k">Total mail records</div><div class="v">{esc(total_mail)}</div></div>
+      <div class="card kpi"><div class="k">Matches</div><div class="v">{total_matches}</div></div>
+      <div class="card kpi"><div class="k">Total revenue</div><div class="v">${total_revenue:,.2f}</div></div>
     </div>
     """
-    return html
+
+    # Top cities/zips HTML
+    def _bullets_city(df):
+        out = []
+        for _, r in df.iterrows():
+            city = (r["crm_city"] or "").rstrip(".")
+            state = r["crm_state"] or ""
+            out.append(f"{esc(city)}, {esc(state)}: {int(r['matches'])}")
+        return " &nbsp; ".join(out) if out else "—"
+
+    def _bullets_zip(df):
+        out = [f"{esc(str(r['crm_zip']))}: {int(r['matches'])}" for _, r in df.iterrows()]
+        return " &nbsp; ".join(out) if out else "—"
+
+    top_html = f"""
+    <div class="grid">
+      <div class="card">
+        <div class="k">Top Cities</div>
+        <div class="v" style="font-size:16px; font-weight:600">{_bullets_city(city_counts)}</div>
+      </div>
+      <div class="card">
+        <div class="k">Top ZIPs</div>
+        <div class="v" style="font-size:16px; font-weight:600">{_bullets_zip(zip_counts)}</div>
+      </div>
+    </div>
+    """
+
+    # Monthly simple bar (inline HTML/CSS bars)
+    bars = []
+    maxv = int(monthly["matches"].max()) if not monthly.empty else 0
+    for _, r in monthly.iterrows():
+        m = esc(r["month"])
+        v = int(r["matches"])
+        w = int( (v / maxv) * 100 ) if maxv > 0 else 0
+        bars.append(f"""
+          <div style="display:flex; align-items:center; gap:10px;">
+            <div style="width:90px; color:#64748b; font-weight:700">{m}</div>
+            <div style="flex:1; background:#eef2f7; border-radius:999px; overflow:hidden;">
+              <div style="width:{w}%; height:10px;"></div>
+            </div>
+            <div style="width:50px; text-align:right; font-weight:800">{v}</div>
+          </div>
+        """)
+    month_html = f"""
+      <div class="card">
+        <div class="k">Matched jobs by month</div>
+        <div style="display:flex; flex-direction:column; gap:8px; margin-top:10px;">
+          {''.join(bars) if bars else '<div class="note">No dated matches</div>'}
+        </div>
+      </div>
+    """
+
+    # Summary table (hide bucket; confidence next to notes already handled upstream)
+    # We render: CRM Date | Amount | Mail Address | Mail City/State/Zip | CRM Address | CRM City/State/Zip | Confidence | Notes
+    # Use the precomputed display columns for addresses with unit.
+    head = """
+      <table>
+        <thead>
+          <tr>
+            <th>CRM Date</th>
+            <th>Amount</th>
+            <th>Mail Address</th>
+            <th>Mail City/State/Zip</th>
+            <th>CRM Address</th>
+            <th>CRM City/State/Zip</th>
+            <th>Confidence</th>
+            <th>Notes</th>
+          </tr>
+        </thead>
+        <tbody>
+    """
+    rows_html = []
+    for _, r in d.head(200).iterrows():
+        rows_html.append(f"""
+          <tr>
+            <td>{esc(r.get('crm_job_date',''))}</td>
+            <td>{esc(r.get('crm_amount',''))}</td>
+            <td>{esc(r.get('_mail_addr_disp','')) or esc(r.get('address1',''))}</td>
+            <td>{esc(r.get('_mail_city_disp',''))}</td>
+            <td>{esc(r.get('_crm_addr_disp','')) or esc(r.get('crm_address1',''))}</td>
+            <td>{esc(r.get('_crm_city_disp',''))}</td>
+            <td>{esc(f"{int(r.get('confidence',0))}%")}</td>
+            <td>{esc(r.get('match_notes',''))}</td>
+          </tr>
+        """)
+
+    table_html = head + "\n".join(rows_html) + "\n</tbody></table>"
+
+    # Put it all together
+    html_out = f"""
+    <div class="grid">
+      {kpi_html}
+      {top_html}
+      {month_html}
+    </div>
+    <div style="margin-top:18px;" class="note">Sample of Matches<br/>Sorted by most recent CRM date (falls back to mail date).</div>
+    <div style="margin-top:8px;">{table_html}</div>
+    """
+    return html_out
