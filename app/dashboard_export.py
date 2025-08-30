@@ -1,12 +1,8 @@
 # app/dashboard_export.py
 from __future__ import annotations
 import html
-import io
-import math
 import re
-from datetime import datetime
 from typing import Tuple
-
 import pandas as pd
 
 # ---------- helpers: safe html ----------
@@ -83,13 +79,14 @@ def _format_city_state_zip(city: str, state: str, zipc: str) -> str:
     return zipc
 
 # ---------- public: finalize for export ----------
-def finalize_summary_for_export_v17(df: pd.DataFrame) -> pd.DataFrame:
+def finalize_summary_for_export_v17(df: pd.DataFrame, **_ignore) -> pd.DataFrame:
     """
     Normalize/prepare the summary dataframe for export and display.
     Expected incoming columns include:
       - crm_job_date, crm_amount, crm_address1, crm_address2, crm_city, crm_state, crm_zip
       - address1, address2, city, state, zip
       - confidence, match_notes
+    Extra kwargs are ignored so callers can pass more without breaking.
     """
     d = df.copy()
 
@@ -138,19 +135,22 @@ def finalize_summary_for_export_v17(df: pd.DataFrame) -> pd.DataFrame:
         axis=1
     )
 
-    # Sort newest CRM date first, then fallback to mail city/zip alpha if tie
+    # Sort newest CRM date first
     d = d.sort_values(by=["_crm_dt"], ascending=[False], na_position="last").reset_index(drop=True)
-
     return d
 
 # ---------- public: render html dashboard ----------
-def render_full_dashboard_v17(summary_df: pd.DataFrame, mail_total_count: int | None = None) -> str:
+def render_full_dashboard_v17(
+    summary_df: pd.DataFrame,
+    mail_total_count: int | None = None,
+    **_ignore,
+) -> str:
     d = summary_df.copy()
 
     # KPIs
     total_mail = mail_total_count if mail_total_count is not None else ""
     total_matches = len(d)
-    # Total revenue (numeric sum of crm_amount where parsable)
+
     def _to_float(x):
         if x is None: return 0.0
         s = str(x).strip().replace("$","").replace(",","")
@@ -160,7 +160,7 @@ def render_full_dashboard_v17(summary_df: pd.DataFrame, mail_total_count: int | 
             return 0.0
     total_revenue = d["crm_amount"].map(_to_float).sum()
 
-    # Top cities/zips (from CRM side for consistency)
+    # Top cities/zips (CRM side)
     city_counts = (
         d.groupby(["crm_city","crm_state"], dropna=False)
           .size().reset_index(name="matches")
@@ -182,7 +182,7 @@ def render_full_dashboard_v17(summary_df: pd.DataFrame, mail_total_count: int | 
           .sort_values("month")
     )
 
-    # Build KPI HTML
+    # KPI HTML
     kpi_html = f"""
     <div class="grid">
       <div class="card kpi"><div class="k">Total mail records</div><div class="v">{esc(total_mail)}</div></div>
@@ -217,13 +217,13 @@ def render_full_dashboard_v17(summary_df: pd.DataFrame, mail_total_count: int | 
     </div>
     """
 
-    # Monthly simple bar (inline HTML/CSS bars)
+    # Monthly mini bars
     bars = []
     maxv = int(monthly["matches"].max()) if not monthly.empty else 0
     for _, r in monthly.iterrows():
         m = esc(r["month"])
         v = int(r["matches"])
-        w = int( (v / maxv) * 100 ) if maxv > 0 else 0
+        w = int((v / maxv) * 100) if maxv > 0 else 0
         bars.append(f"""
           <div style="display:flex; align-items:center; gap:10px;">
             <div style="width:90px; color:#64748b; font-weight:700">{m}</div>
@@ -242,9 +242,7 @@ def render_full_dashboard_v17(summary_df: pd.DataFrame, mail_total_count: int | 
       </div>
     """
 
-    # Summary table (hide bucket; confidence next to notes already handled upstream)
-    # We render: CRM Date | Amount | Mail Address | Mail City/State/Zip | CRM Address | CRM City/State/Zip | Confidence | Notes
-    # Use the precomputed display columns for addresses with unit.
+    # Summary table
     head = """
       <table>
         <thead>
@@ -278,7 +276,6 @@ def render_full_dashboard_v17(summary_df: pd.DataFrame, mail_total_count: int | 
 
     table_html = head + "\n".join(rows_html) + "\n</tbody></table>"
 
-    # Put it all together
     html_out = f"""
     <div class="grid">
       {kpi_html}
