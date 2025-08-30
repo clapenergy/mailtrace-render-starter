@@ -1,4 +1,5 @@
-# mailtrace_matcher.py
+# app/mailtrace_matcher.py
+# Dashboard-v4: fuzzy matching with explicit unit penalties baked into confidence
 from __future__ import annotations
 import re
 from datetime import datetime, date
@@ -36,7 +37,7 @@ DIRECTIONALS = {
     "se":"southeast","se.":"southeast",
     "sw":"southwest","sw.":"southwest",
 }
-UNIT_WORDS = {"apt","apartment","suite","ste","unit","#"}
+UNIT_WORDS = {"apt","apartment","suite","ste","unit","#","bldg","fl","floor"}
 
 # --- Helpers ---
 def _squash_ws(s: str) -> str:
@@ -98,6 +99,36 @@ def parse_date_any(s: str) -> Optional[date]:
 def fmt_dd_mm_yy(d: Optional[date]) -> str:
     return d.strftime("%d-%m-%y") if isinstance(d, date) else "None provided"
 
+# --- Unit normalization ---
+_UNIT_EXTRACT = re.compile(
+    r"(?:^|[\s,.-])(?:(apt|apartment|suite|ste|unit|bldg|fl|floor)\s*#?\s*([\w-]+)|#\s*([\w-]+))\s*$",
+    re.IGNORECASE,
+)
+
+def normalize_unit_text(u: str) -> tuple[str, str]:
+    """
+    Returns (label, number) normalized.
+    Examples:
+      "Apt 2" -> ("unit", "2")
+      "STE B" -> ("unit", "b")
+      "#4"    -> ("unit", "4")
+    """
+    if not isinstance(u, str) or not u.strip():
+        return ("", "")
+    s = u.strip()
+    m = _UNIT_EXTRACT.search(s)
+    if m:
+        label = (m.group(1) or "").lower()
+        num = (m.group(2) or m.group(3) or "").strip().lower()
+        if label in ("apt","apartment","suite","ste","unit","bldg","fl","floor") or label == "":
+            label = "unit"  # normalize all to 'unit'
+        return (label, num)
+    # Nothing matched; fall back to basic parse like "2B", "B-2"
+    txt = re.sub(r"[^A-Za-z0-9-]", "", s).lower()
+    if txt:
+        return ("unit", txt)
+    return ("", "")
+
 # --- Scoring ---
 def _ratio(a: str, b: str) -> float:
     return SequenceMatcher(None, a, b).ratio()
@@ -114,7 +145,7 @@ def score_row(mail_row: pd.Series, crm_row: pd.Series) -> Tuple[int, List[str]]:
     sim = address_similarity(a_mail, a_crm)      # 0..1
     score = int(round(sim * 100))                # 0..100 base
 
-    # Bonuses for other fields (capped at 100)
+    # Bonuses for geo (capped at 100)
     mz = str(mail_row.get("postal_code", "")).strip()
     cz = str(crm_row.get("postal_code", "")).strip()
     if mz[:5] and cz[:5] and mz[:5] == cz[:5]:
@@ -126,29 +157,51 @@ def score_row(mail_row: pd.Series, crm_row: pd.Series) -> Tuple[int, List[str]]:
     if str(mail_row.get("state", "")).strip().lower() == str(crm_row.get("state", "")).strip().lower():
         score = min(100, score + 2)
 
-    # Mismatch notes (concise)
     notes: List[str] = []
+
+    # Street-type note (kept as note only; similarity usually captures this)
     ta, tb = tokens(a_crm), tokens(a_mail)
     st_a, st_b = street_type_of(ta), street_type_of(tb)
     if st_a != st_b and (st_a or st_b):
         notes.append(f"{st_b or 'none'} vs {st_a or 'none'} (street type)")
 
+    # Directional note (e.g., N, S)
     dir_a, dir_b = directional_in(ta), directional_in(tb)
     if dir_a != dir_b and (dir_a or dir_b):
         notes.append(f"{dir_b or 'none'} vs {dir_a or 'none'} (direction)")
 
+    # ---- NEW: Unit penalties that affect score ----
     unit_a = str(crm_row.get("address2", "") or "").strip()
     unit_b = str(mail_row.get("address2", "") or "").strip()
-    if bool(unit_a) != bool(unit_b):
+    lab_a, num_a = normalize_unit_text(unit_a)
+    lab_b, num_b = normalize_unit_text(unit_b)
+
+    if not num_a and not num_b:
+        # no units on either side -> no penalty
+        pass
+    elif (num_a and not num_b) or (num_b and not num_a):
+        # one side has a unit, the other does not -> medium penalty
+        score = max(0, score - 10)
         notes.append(f"{unit_b or 'none'} vs {unit_a or 'none'} (unit)")
-    elif unit_a and unit_b and unit_a.lower() != unit_b.lower():
-        notes.append(f"{unit_b} vs {unit_a} (unit)")
+    else:
+        # both sides have a unit number; compare normalized numbers (labels don't matter)
+        if num_a != num_b:
+            score = max(0, score - 18)  # significant penalty
+            notes.append(f"{unit_b or 'none'} vs {unit_a or 'none'} (unit)")
+        else:
+            # numbers match -> no penalty; keep note only if labels are wildly different (optional)
+            if lab_a != lab_b and (lab_a or lab_b):
+                # You can comment this out if you don't want a note for label differences
+                notes.append(f"{(lab_b + ' ' + num_b).strip()} vs {(lab_a + ' ' + num_a).strip()} (unit label)")
+
+    # Cap score 0..100
+    score = max(0, min(100, score))
 
     if score >= 100 and not notes:
         return 100, ["perfect match"]
-    return min(100, score), notes
+    return score, notes
 
-# --- Canonicalize column names and run matching ---
+# --- Canonicalize columns and run matching ---
 def _canon_columns(df: pd.DataFrame, mapping: dict) -> pd.DataFrame:
     d = df.copy()
     d.columns = [c.lower().strip() for c in d.columns]
@@ -190,6 +243,7 @@ def run_matching(mail_df: pd.DataFrame, crm_df: pd.DataFrame) -> pd.DataFrame:
         "state": ["state","st"],
         "postal_code": ["postal_code","zip","zipcode","zip_code"],
         "job_date": ["job_date","date","created_at"],
+        "amount": ["amount","value","job_value","revenue"],
     })
 
     # Blocking keys + parsed dates
@@ -208,7 +262,7 @@ def run_matching(mail_df: pd.DataFrame, crm_df: pd.DataFrame) -> pd.DataFrame:
         if candidates is None or candidates.empty:
             continue
 
-        # Date window: include mail with date <= CRM date.
+        # Date window: include mail with date <= CRM date (if CRM date known)
         if c["_date"]:
             cand = candidates[(candidates["_date"].isna()) | (candidates["_date"] <= c["_date"])]
         else:
@@ -216,7 +270,7 @@ def run_matching(mail_df: pd.DataFrame, crm_df: pd.DataFrame) -> pd.DataFrame:
         if cand.empty:
             continue
 
-        # Score & pick best
+        # Score & pick best; tie-breaker = earliest mail date
         best = None
         best_score = -1
         best_notes: List[str] = []
@@ -225,7 +279,7 @@ def run_matching(mail_df: pd.DataFrame, crm_df: pd.DataFrame) -> pd.DataFrame:
             if s > best_score or (s == best_score and (m.get("_date") or date.min) < (best.get("_date") if best is not None else date.max)):
                 best, best_score, best_notes = m, s, notes
 
-        # Collect all prior mail dates
+        # Collect all prior mail dates (sorted oldest→newest)
         prior_dates = []
         for _, m in cand.iterrows():
             d = m.get("_date")
@@ -233,7 +287,7 @@ def run_matching(mail_df: pd.DataFrame, crm_df: pd.DataFrame) -> pd.DataFrame:
         prior_sorted = [d for d in sorted([d for d in prior_dates if d is not None])]
         mail_dates_list = ", ".join(fmt_dd_mm_yy(d) for d in prior_sorted) if prior_sorted else "None provided"
 
-        # Build full mail address
+        # Build full mail address (original form; blank addr2 if missing)
         full_mail = " ".join([
             str(best.get("address1", "")).strip(),
             (str(best.get("address2", "")).strip() or ""),
@@ -250,6 +304,7 @@ def run_matching(mail_df: pd.DataFrame, crm_df: pd.DataFrame) -> pd.DataFrame:
             "crm_state": c.get("state", ""),
             "crm_zip": str(c.get("postal_code", "")),
             "crm_job_date": fmt_dd_mm_yy(c.get("_date")),
+            "crm_amount": c.get("amount", ""),
             "matched_mail_id": best.get("id", ""),
             "matched_mail_full_address": full_mail.replace(" None", "").replace(" none", ""),
             "mail_dates_in_window": mail_dates_list,
@@ -267,6 +322,7 @@ def run_matching_from_csv(mail_csv: str, crm_csv: str) -> pd.DataFrame:
     return run_matching(mail, crm)
 
 if __name__ == "__main__":
+    # Minimal CLI behavior when run directly:
     import argparse
     p = argparse.ArgumentParser(description="MailTrace matching logic (summary CSV to stdout).")
     p.add_argument("--mail", required=True, help="Path to mail CSV")
