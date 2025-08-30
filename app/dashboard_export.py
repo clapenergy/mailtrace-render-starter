@@ -1,12 +1,6 @@
 # app/dashboard_export.py
-# Dashboard renderer for MailTrace (resilient to messy columns)
-# - Keeps your current layout (KPIs, Top 5 Cities/ZIPs with scroll, vertical bars with months on X)
-# - Summary table columns:
-#     CRM Date | Amount | Mail Address | Mail City/State/Zip | CRM Address | CRM City/State/Zip | Confidence | Notes
-# - Robust address formatter:
-#     * strips city/state/zip accidentally appended to addr1
-#     * rescues when addr1 is only a house number and street leaked into the "city" cell
-#     * shows units as ", UNIT" after the street
+# Dashboard-v4.1 — adds color-coded confidence in the summary table.
+# Also keeps the Dashboard-v3 fixes (address rescue, KPIs, Top 5 lists with scroll, monthly chart).
 
 from __future__ import annotations
 import io, base64, html, re
@@ -27,13 +21,11 @@ def _money_to_float(s: str) -> float:
 
 # ---------------- Address parsing helpers ----------------
 
-# Inline unit at end of a line, e.g. "... Apt 2", "... Ste 3", "... #4"
 _UNIT_PAT = re.compile(
     r"(?:^|[\s,.-])(?:(apt|apartment|suite|ste|unit|bldg|fl|floor)\s*#?\s*([\w-]+)|#\s*([\w-]+))\s*$",
     re.IGNORECASE,
 )
 
-# Words that suggest street content
 _STREET_WORDS = {
     "street","st","st.","avenue","ave","ave.","av","av.","boulevard","blvd","blvd.","road","rd","rd.",
     "lane","ln","ln.","drive","dr","dr.","court","ct","ct.","circle","cir","cir.","parkway","pkwy","pkwy.",
@@ -41,7 +33,6 @@ _STREET_WORDS = {
     "pkway","common","cmn","cmn.","pkwy"
 }
 
-# Detect city/state/zip tail jammed onto addr1, e.g. "..., City, ST 12345"
 _CITY_ST_ZIP_TAIL = re.compile(
     r"\s*(?:,?\s*[A-Za-z .'\-]+)?\s*,?\s*[A-Z]{2}\s+\d{5}(?:-\d{4})?\s*$"
 )
@@ -79,65 +70,42 @@ def _city_has_streety_bits(city: str) -> bool:
     return has_street_word or has_num
 
 def _extract_street_from_city_loose(city: str, true_city_guess: str) -> Tuple[str, str]:
-    """
-    Try to split a city cell that actually contains "street + city":
-      e.g. "Cedar Ln Garland" -> ("Cedar Ln", "Garland")
-    Strategy:
-      - Prefer splitting before the LAST token(s) that look like a city name (Titlecase, not a street word).
-      - If a 'true_city_guess' is supplied (the same field, but used as a tail), split at its last occurrence.
-      - Fallback: if commas exist, split at the last comma.
-    """
     s = (city or "").strip()
     if not s:
         return "", ""
-    # If we can find the last occurrence of the tail city token, split there.
     if true_city_guess and true_city_guess in s and true_city_guess != s:
         head = s[: s.rfind(true_city_guess)].rstrip(" ,.-")
         tail = true_city_guess
         if head and tail:
             return head, tail
-    # Token-based heuristic: assume trailing 1–2 tokens form the city name
     toks = re.findall(r"[A-Za-z0-9']+", s)
     if len(toks) >= 2:
-        # Try last one as city
         last = toks[-1]
         if last.isalpha() and last[0].isupper() and last.lower() not in _STREET_WORDS:
             head = " ".join(toks[:-1]).strip()
             tail = last
             if head and tail:
                 return head, tail
-        # Try last two as city (e.g., "San Marcos")
-        last2 = " ".join(toks[-2:])
-        if all(x.isalpha() and x[0].isupper() for x in toks[-2:]):
+        if len(toks) >= 2 and all(x.isalpha() and x[0].isupper() for x in toks[-2:]):
             head = " ".join(toks[:-2]).strip()
-            tail = last2
+            tail = " ".join(toks[-2:])
             if head and tail:
                 return head, tail
-    # Comma heuristic
     if "," in s:
         head, tail = s.rsplit(",", 1)
         return head.strip(" ,.-"), tail.strip()
-    # Nothing clear
     return "", s
 
 def _format_addr_with_unit(addr1: str, addr2: str, mail_city: str = "", mail_state: str = "", mail_zip: str = "") -> str:
-    """
-    Display: 'street, UNIT' (if we detect explicit or inline unit).
-    Also rescues cases where addr1 is only a number and street leaked into the "city" cell.
-    """
     a1_raw = (addr1 or "").strip()
     a2 = (addr2 or "").strip()
-
-    # 1) If addr1 has a trailing ", City, ST ZIP", strip it
     a1 = _strip_trailing_city_state_zip(a1_raw)
 
-    # 2) Rescue: addr1 is just a number AND city looks streety -> pull street from city
     if _looks_like_house_number_only(a1) and _city_has_streety_bits(mail_city):
-        street_from_city, cleaned_city_guess = _extract_street_from_city_loose(mail_city, mail_city)
+        street_from_city, _ = _extract_street_from_city_loose(mail_city, mail_city)
         if street_from_city:
             a1 = (a1 + " " + street_from_city).strip()
 
-    # 3) Attach unit
     if a2:
         street, _ = _split_unit_from_line(a1)
         unit = a2
@@ -148,13 +116,10 @@ def _format_addr_with_unit(addr1: str, addr2: str, mail_city: str = "", mail_sta
     return f"{street}, {unit}".strip(", ").strip()
 
 def _clean_city_for_display(city: str) -> str:
-    """
-    If city cell contains street junk, try to keep only the city name.
-    """
     s = (city or "").strip()
     if not s:
         return s
-    street_part, city_clean = _extract_street_from_city_loose(s, s)
+    _, city_clean = _extract_street_from_city_loose(s, s)
     if city_clean and city_clean != s:
         return city_clean
     return s
@@ -214,6 +179,21 @@ def finalize_summary_for_export_v17(df: pd.DataFrame) -> pd.DataFrame:
     d["match_notes"] = d["match_notes"].map(_fix_notes)
 
     return d
+
+# ---------------- Confidence color formatting ----------------
+def _conf_span(v) -> str:
+    """Return a <span> with class for colored confidence."""
+    try:
+        val = int(v)
+    except Exception:
+        return _esc(v)
+    if val >= 94:
+        klass = "conf-high"
+    elif val >= 88:
+        klass = "conf-mid"
+    else:
+        klass = "conf-low"
+    return f'<span class="{klass}">{val}%</span>'
 
 # ---------------- Public API: render ----------------
 def render_full_dashboard_v17(summary_df: pd.DataFrame,
@@ -278,7 +258,7 @@ def render_full_dashboard_v17(summary_df: pd.DataFrame,
     month_png_b64 = base64.b64encode(bio.getvalue()).decode("ascii")
     month_img_tag = f'<img alt="Matched jobs by month" src="data:image/png;base64,{month_png_b64}" style="width:100%;max-width:1000px;">'
 
-    # CSS
+    # CSS (adds conf-high/mid/low classes)
     css = """
     <style>
       :root { --brand:#0c2d4e; --accent:#759d40; --on-brand:#fff; --text:#0f172a; --muted:#64748b; --border:#e5e7eb; }
@@ -293,9 +273,12 @@ def render_full_dashboard_v17(summary_df: pd.DataFrame,
       .kvlist li { display:flex; align-items:center; justify-content:space-between; padding:8px 0; border-bottom:1px solid #f1f5f9; font-weight:600; }
       .scroll { max-height:220px; overflow-y:auto; padding-right:6px; }
       table { width:100%; border-collapse: collapse; background:#fff; border:1px solid var(--border); border-radius:12px; overflow:hidden; margin-top:16px; }
-      th, td { text-align:left; padding:12px 14px; border-bottom:1px solid #f3f4f6; font-size:14px; }
+      th, td { text-align:left; padding:12px 14px; border-bottom:1px solid #f3f4f6; font-size:14px; vertical-align: top; }
       th { background:#f8fafc; }
       h2 { margin: 20px 0 8px; }
+      .conf-high { color:#15803d; font-weight:800; }  /* green */
+      .conf-mid  { color:#b45309; font-weight:800; }  /* orange */
+      .conf-low  { color:#b91c1c; font-weight:800; }  /* red */
     </style>
     """
 
@@ -374,6 +357,7 @@ def render_full_dashboard_v17(summary_df: pd.DataFrame,
             r.get("crm_address1",""), r.get("crm_address2",""),
             r.get("crm_city",""), r.get("crm_state",""), r.get("crm_zip","")
         )
+        conf_html = _conf_span(r.get("confidence", ""))
         rows_html.append(f"""
           <tr>
             <td>{_esc(r.get('crm_job_date',''))}</td>
@@ -382,7 +366,7 @@ def render_full_dashboard_v17(summary_df: pd.DataFrame,
             <td>{_esc(_format_city_state_zip(r.get('city',''), r.get('state',''), r.get('zip','')))}</td>
             <td>{_esc(crm_addr)}</td>
             <td>{_esc(_format_city_state_zip(r.get('crm_city',''), r.get('crm_state',''), r.get('crm_zip','')))}</td>
-            <td>{_esc(f"{int(r.get('confidence',0))}%")}</td>
+            <td>{conf_html}</td>
             <td>{_esc(r.get('match_notes',''))}</td>
           </tr>
         """)
