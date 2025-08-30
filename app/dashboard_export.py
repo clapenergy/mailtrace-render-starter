@@ -1,24 +1,18 @@
 # app/dashboard_export.py
-# Full dashboard renderer for MailTrace
-# - KPIs: Total mail, Matches, Total revenue (+ optional Avg mailers before job, Mailers per acquisition)
-# - Top 5 Cities & Top 5 ZIPs (scrollable)
-# - "Matched Jobs by Month" chart: vertical bars, months on X-axis
-# - Sample table: CRM Date | Amount | Mail Address | Mail City/State/Zip | CRM Address | CRM City/State/Zip | Confidence | Notes
-# - No bucket breakdown; confidence shown as a % and notes concise
-# - Robust to mixed/missing values
+# Dashboard renderer for MailTrace (resilient to messy columns)
+# - Keeps your layout (KPIs, Top 5 Cities/ZIPs with scroll, vertical bars with months on X)
+# - Sample table shows:
+#     CRM Date | Amount | Mail Address | Mail City/State/Zip | CRM Address | CRM City/State/Zip | Confidence | Notes
+# - New: fixes cases where street/units leak into the Mail "city" field and address1 is just a house number.
 
 from __future__ import annotations
 import io, base64, html, re
-from typing import Optional
+from typing import Optional, Tuple
 import pandas as pd
 import matplotlib
-matplotlib.use("Agg")  # headless environments (Render)
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-
-# -----------------------
-# Helpers / formatting
-# -----------------------
 def _esc(x) -> str:
     return "" if x is None else html.escape(str(x))
 
@@ -28,13 +22,27 @@ def _money_to_float(s: str) -> float:
     except Exception:
         return 0.0
 
-# Extract inline unit suffixes like "... Apt 2", "... #4", "... Ste 3"
+# ---------- Unit & city/zip handling ----------
 _UNIT_PAT = re.compile(
     r"(?:^|[\s,.-])(?:(apt|apartment|suite|ste|unit|bldg|fl|floor)\s*#?\s*([\w-]+)|#\s*([\w-]+))\s*$",
     re.IGNORECASE,
 )
 
-def _split_unit_from_line(addr1: str):
+_STREET_WORDS = {
+    "street","st","st.","avenue","ave","ave.","av","av.","boulevard","blvd","blvd.","road","rd","rd.",
+    "lane","ln","ln.","drive","dr","dr.","court","ct","ct.","circle","cir","cir.","parkway","pkwy","pkwy.",
+    "place","pl","pl.","terrace","ter","ter.","trail","trl","trl.","highway","hwy","hwy.","way","wy","wy.",
+    "pkwy","pkway","pkway.","common","cmn","cmn."
+}
+
+_STATE2 = re.compile(r"\b[A-Z]{2}\b")
+_ZIP_PAT = re.compile(r"\d{5}(?:-\d{4})?$")
+
+_CITY_ST_ZIP_TAIL = re.compile(
+    r"\s*(?:,?\s*[A-Za-z .'\-]+)?\s*,?\s*[A-Z]{2}\s+\d{5}(?:-\d{4})?\s*$"
+)
+
+def _split_unit_from_line(addr1: str) -> Tuple[str,str]:
     s = (addr1 or "").strip()
     if not s:
         return "", ""
@@ -48,24 +56,104 @@ def _split_unit_from_line(addr1: str):
     street = s[: m.start()].rstrip(" ,.-")
     return street, unit
 
-def _format_addr_with_unit(addr1: str, addr2: str) -> str:
+def _strip_trailing_city_state_zip(addr1: str) -> str:
+    s = (addr1 or "").strip()
+    if not s:
+        return s
+    # remove a trailing "..., City, ST 12345" if someone jammed a full address into addr1
+    if _CITY_ST_ZIP_TAIL.search(s):
+        s = _CITY_ST_ZIP_TAIL.sub("", s).rstrip(" ,.-")
+    return s
+
+def _looks_like_house_number_only(s: str) -> bool:
+    return bool(re.fullmatch(r"\d{1,8}", (s or "").strip()))
+
+def _city_has_streety_bits(city: str) -> bool:
+    if not isinstance(city, str): return False
+    t = re.findall(r"[A-Za-z0-9#']+", city.lower())
+    has_num = any(tok.isdigit() for tok in t)
+    has_street_word = any(tok in _STREET_WORDS for tok in t)
+    return has_street_word or has_num
+
+def _extract_street_from_city(city: str) -> Tuple[str, str]:
     """
-    Display rule: show unit as a suffix `, UNIT` if either addr2 is present
-    or we detect an inline unit in addr1. Keeps the original street text.
+    If the 'city' field mistakenly contains street/unit + proper city/state/zip,
+    try to separate: return (street_unit_part, cleaned_city_part).
+    Examples city inputs:
+      "Riverside Cir Unit B Richardson, TX 75006"
+      "5208 Riverside Cir, Apt 2, Richardson TX 75006"
     """
-    a1 = (addr1 or "").strip()
+    s = (city or "").strip()
+    if not s:
+        return "", ""
+    # Try to split off a "real city/state/zip" tail
+    # Heuristic: find last occurrence of ", XX 12345" or " XX 12345"
+    m = re.search(r"(.+?)[, ]+\s*([A-Za-z .'\-]+)\s*,?\s*([A-Z]{2})\s+(\d{5}(?:-\d{4})?)\s*$", s)
+    if m:
+        street_part = m.group(1).strip(" ,.-")
+        city_clean  = m.group(2).strip()
+        return street_part, city_clean
+    # If we cannot find state/zip, but there are commas, assume last comma separates city tail
+    if "," in s:
+        head, tail = s.rsplit(",", 1)
+        return head.strip(" ,.-"), tail.strip()
+    # Fallback: no clear delimiter -> nothing to extract
+    return "", s
+
+def _format_addr_with_unit(addr1: str, addr2: str, city_for_rescue: str = "") -> str:
+    """
+    Display: 'street, UNIT' (if we detect explicit or inline unit).
+    Also rescues cases where address1 is only a number and the street leaked into the city column.
+    """
+    a1_raw = (addr1 or "").strip()
     a2 = (addr2 or "").strip()
-    if a2:  # explicit unit column wins
+
+    # Rescue if addr1 is just a number and city contains street-like text
+    if _looks_like_house_number_only(a1_raw) and _city_has_streety_bits(city_for_rescue):
+        street_from_city, _city_clean = _extract_street_from_city(city_for_rescue)
+        if street_from_city:
+            # recompose: "1234 <street_from_city>"
+            a1_raw = (a1_raw + " " + street_from_city).strip()
+
+    a1 = _strip_trailing_city_state_zip(a1_raw)
+
+    if a2:
         street, _ = _split_unit_from_line(a1)
         unit = a2
     else:
         street, unit = _split_unit_from_line(a1)
         if not unit:
-            return a1
+            return street
     return f"{street}, {unit}".strip(", ").strip()
 
+def _clean_city_for_display(city: str) -> str:
+    """
+    If the city field has accidental street/number junk, try to clean it:
+    - If we can parse "<street>, <City> [ST ZIP]" -> return <City>
+    - Drop leading numbers/street words if they precede a plausible city token
+    """
+    s = (city or "").strip()
+    if not s:
+        return s
+    # Try the same extraction logic
+    street_part, city_clean = _extract_street_from_city(s)
+    if city_clean:
+        return city_clean
+    # Remove leading house numbers and street tokens
+    toks = re.findall(r"[A-Za-z0-9']+", s)
+    out = []
+    dropped = True
+    for t in toks:
+        low = t.lower()
+        if dropped and (t.isdigit() or low in _STREET_WORDS):
+            continue
+        dropped = False
+        out.append(t)
+    guess = " ".join(out).strip()
+    return guess or s
+
 def _format_city_state_zip(city: str, state: str, zipc: str) -> str:
-    city = (city or "").strip().rstrip(".")
+    city = _clean_city_for_display(city)
     state = (state or "").strip().upper()
     zipc = (zipc or "").strip()
     if city and state:
@@ -76,22 +164,10 @@ def _format_city_state_zip(city: str, state: str, zipc: str) -> str:
         return f"{state} {zipc}".strip()
     return zipc
 
-
-# -----------------------
-# Public API: finalizer
-# -----------------------
+# ---------- Public API: finalize ----------
 def finalize_summary_for_export_v17(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Normalize/clean columns so the dashboard & export are consistent.
-    Expected downstream columns include:
-      crm_job_date, crm_amount,
-      address1,address2,city,state,zip,
-      crm_address1,crm_address2,crm_city,crm_state,crm_zip,
-      confidence, match_notes
-    """
     d = df.copy()
 
-    # Common alternative column names -> normalize
     rename_map = {
         "crmaddress1": "crm_address1", "crm_address1_original": "crm_address1",
         "crmaddress2": "crm_address2",
@@ -104,30 +180,26 @@ def finalize_summary_for_export_v17(df: pd.DataFrame) -> pd.DataFrame:
         if k in d.columns and v not in d.columns:
             d.rename(columns={k: v}, inplace=True)
 
-    # Ensure columns exist
     for col in [
         "crm_job_date","crm_amount",
         "address1","address2","city","state","zip",
         "crm_address1","crm_address2","crm_city","crm_state","crm_zip",
-        "confidence","match_notes"
+        "confidence","match_notes","mail_count_in_window"
     ]:
         if col not in d.columns:
             d[col] = ""
 
-    # Confidence as 0..100 int
     try:
-        d["confidence"] = pd.to_numeric(d["confidence"], errors="coerce").fillna(0).clip(0, 100).astype(int)
+        d["confidence"] = pd.to_numeric(d["confidence"], errors="coerce").fillna(0).clip(0,100).astype(int)
     except Exception:
         d["confidence"] = 0
 
-    # Amount: store as pretty $X,XXX.XX string for display
     if "crm_amount" in d.columns:
         def _fmt_money(x):
             v = _money_to_float(x)
             return f"${v:,.2f}" if v else ""
         d["crm_amount"] = d["crm_amount"].map(_fmt_money)
 
-    # Clean notes "nan/NaN" → "none"
     def _fix_notes(x):
         if not isinstance(x, str) or not x:
             return x
@@ -136,38 +208,26 @@ def finalize_summary_for_export_v17(df: pd.DataFrame) -> pd.DataFrame:
 
     return d
 
-
-# -----------------------
-# Public API: dashboard HTML
-# -----------------------
+# ---------- Public API: render ----------
 def render_full_dashboard_v17(summary_df: pd.DataFrame,
                               mail_total_count: Optional[int] = None,
                               **_ignore) -> str:
-    """
-    Return a full self-contained HTML fragment (no external assets).
-    """
     d = summary_df.copy()
 
-    # ---------- KPI numbers ----------
     total_mail = int(mail_total_count) if mail_total_count not in (None, "") else ""
     total_matches = len(d)
     total_revenue = d["crm_amount"].map(_money_to_float).sum()
 
-    # Optional KPI: Avg mailers before job (if provided by upstream)
     avg_mailers_prior = None
-    for candidate in ("mail_count_in_window", "mailers_prior", "mail_count_prior"):
-        if candidate in d.columns:
-            s = pd.to_numeric(d[candidate], errors="coerce")
-            if s.notna().any():
-                avg_mailers_prior = float(s.mean())
-                break
+    if "mail_count_in_window" in d.columns:
+        s = pd.to_numeric(d["mail_count_in_window"], errors="coerce")
+        if s.notna().any():
+            avg_mailers_prior = float(s.mean())
 
-    # Optional KPI: Mailers per acquisition (requires total_mail)
     mailers_per_acq = None
     if total_mail and total_matches:
         mailers_per_acq = total_mail / total_matches
 
-    # ---------- Top lists ----------
     safe_city = d.get("crm_city", "").fillna("")
     safe_state = d.get("crm_state", "").fillna("")
     safe_zip = d.get("crm_zip", "").fillna("")
@@ -184,7 +244,6 @@ def render_full_dashboard_v17(summary_df: pd.DataFrame,
                     .reset_index(name="matches")
                     .sort_values("matches", ascending=False).head(5))
 
-    # ---------- Monthly counts (vertical bars; months on X) ----------
     mdates = pd.to_datetime(d.get("crm_job_date", ""), errors="coerce")
     monthly_counts = (pd.DataFrame({"month": mdates})
                         .dropna()
@@ -192,7 +251,7 @@ def render_full_dashboard_v17(summary_df: pd.DataFrame,
                         .groupby("month")
                         .size().reset_index(name="matches"))
     monthly_counts["month_str"] = monthly_counts["month"].astype(str)
-    monthly_counts = monthly_counts.sort_values("month")  # chronological
+    monthly_counts = monthly_counts.sort_values("month")
 
     fig, ax = plt.subplots(figsize=(10, 4))
     ax.bar(monthly_counts["month_str"], monthly_counts["matches"])
@@ -209,17 +268,9 @@ def render_full_dashboard_v17(summary_df: pd.DataFrame,
     month_png_b64 = base64.b64encode(bio.getvalue()).decode("ascii")
     month_img_tag = f'<img alt="Matched jobs by month" src="data:image/png;base64,{month_png_b64}" style="width:100%;max-width:1000px;">'
 
-    # ---------- CSS ----------
     css = """
     <style>
-      :root {
-        --brand: #0c2d4e;
-        --accent: #759d40;
-        --on-brand: #ffffff;
-        --text: #0f172a;
-        --muted: #64748b;
-        --border: #e5e7eb;
-      }
+      :root { --brand:#0c2d4e; --accent:#759d40; --on-brand:#fff; --text:#0f172a; --muted:#64748b; --border:#e5e7eb; }
       body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 24px; color: var(--text); }
       .grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(220px,1fr)); gap:16px; }
       .card { background:#fff; border:1px solid var(--border); border-radius:16px; padding:16px; box-shadow:0 2px 8px rgba(0,0,0,.04); }
@@ -237,7 +288,6 @@ def render_full_dashboard_v17(summary_df: pd.DataFrame,
     </style>
     """
 
-    # ---------- KPIs ----------
     kpi_items = [
         f'<div class="card"><div class="k">Total mail records</div><div class="v">{_esc(total_mail)}</div></div>',
         f'<div class="card"><div class="k">Matches</div><div class="v">{total_matches}</div></div>',
@@ -249,7 +299,6 @@ def render_full_dashboard_v17(summary_df: pd.DataFrame,
         kpi_items.append(f'<div class="card"><div class="k">Mailers per acquisition</div><div class="v">{mailers_per_acq:.2f}</div></div>')
     kpis_html = f'<div class="grid">{"".join(kpi_items)}</div>'
 
-    # ---------- Top lists + Chart ----------
     def _city_ul(df):
         items = []
         for _, r in df.iterrows():
@@ -279,9 +328,9 @@ def render_full_dashboard_v17(summary_df: pd.DataFrame,
       </div>
     """
 
-    # ---------- Sample table ----------
-    d["_crm_dt"] = pd.to_datetime(d["crm_job_date"], errors="coerce")
-    d["_mail_dt"] = pd.to_datetime(d.get("mail_date", ""), errors="coerce")
+    # Sort by most recent CRM date; if missing, fallback to mail date if present
+    d["_crm_dt"] = pd.to_datetime(d.get("crm_job_date",""), errors="coerce")
+    d["_mail_dt"] = pd.to_datetime(d.get("mail_date",""), errors="coerce")
     d["_sort_dt"] = d["_crm_dt"].fillna(d["_mail_dt"])
     d = d.sort_values("_sort_dt", ascending=False)
 
@@ -303,8 +352,8 @@ def render_full_dashboard_v17(summary_df: pd.DataFrame,
     """
     rows_html = []
     for _, r in d.head(200).iterrows():
-        mail_addr = _format_addr_with_unit(r.get("address1",""), r.get("address2",""))
-        crm_addr  = _format_addr_with_unit(r.get("crm_address1",""), r.get("crm_address2",""))
+        mail_addr = _format_addr_with_unit(r.get("address1",""), r.get("address2",""), r.get("city",""))
+        crm_addr  = _format_addr_with_unit(r.get("crm_address1",""), r.get("crm_address2",""), r.get("crm_city",""))
         rows_html.append(f"""
           <tr>
             <td>{_esc(r.get('crm_job_date',''))}</td>
@@ -319,5 +368,4 @@ def render_full_dashboard_v17(summary_df: pd.DataFrame,
         """)
     table_html = head + "\n".join(rows_html) + "\n</tbody></table>"
 
-    # Return full HTML fragment
     return css + kpis_html + lists_html + "<h2>Sample of Matches</h2>" + table_html
