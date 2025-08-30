@@ -1,13 +1,16 @@
 # app/dashboard_export.py
 # Dashboard renderer for MailTrace (resilient to messy columns)
-# - Keeps your layout (KPIs, Top 5 Cities/ZIPs with scroll, vertical bars with months on X)
-# - Sample table shows:
+# - Keeps your current layout (KPIs, Top 5 Cities/ZIPs with scroll, vertical bars with months on X)
+# - Summary table columns:
 #     CRM Date | Amount | Mail Address | Mail City/State/Zip | CRM Address | CRM City/State/Zip | Confidence | Notes
-# - New: fixes cases where street/units leak into the Mail "city" field and address1 is just a house number.
+# - Robust address formatter:
+#     * strips city/state/zip accidentally appended to addr1
+#     * rescues when addr1 is only a house number and street leaked into the "city" cell
+#     * shows units as ", UNIT" after the street
 
 from __future__ import annotations
 import io, base64, html, re
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List
 import pandas as pd
 import matplotlib
 matplotlib.use("Agg")
@@ -22,27 +25,39 @@ def _money_to_float(s: str) -> float:
     except Exception:
         return 0.0
 
-# ---------- Unit & city/zip handling ----------
+# ---------------- Address parsing helpers ----------------
+
+# Inline unit at end of a line, e.g. "... Apt 2", "... Ste 3", "... #4"
 _UNIT_PAT = re.compile(
     r"(?:^|[\s,.-])(?:(apt|apartment|suite|ste|unit|bldg|fl|floor)\s*#?\s*([\w-]+)|#\s*([\w-]+))\s*$",
     re.IGNORECASE,
 )
 
+# Words that suggest street content
 _STREET_WORDS = {
     "street","st","st.","avenue","ave","ave.","av","av.","boulevard","blvd","blvd.","road","rd","rd.",
     "lane","ln","ln.","drive","dr","dr.","court","ct","ct.","circle","cir","cir.","parkway","pkwy","pkwy.",
     "place","pl","pl.","terrace","ter","ter.","trail","trl","trl.","highway","hwy","hwy.","way","wy","wy.",
-    "pkwy","pkway","pkway.","common","cmn","cmn."
+    "pkway","common","cmn","cmn.","pkwy"
 }
 
-_STATE2 = re.compile(r"\b[A-Z]{2}\b")
-_ZIP_PAT = re.compile(r"\d{5}(?:-\d{4})?$")
-
+# Detect city/state/zip tail jammed onto addr1, e.g. "..., City, ST 12345"
 _CITY_ST_ZIP_TAIL = re.compile(
     r"\s*(?:,?\s*[A-Za-z .'\-]+)?\s*,?\s*[A-Z]{2}\s+\d{5}(?:-\d{4})?\s*$"
 )
 
-def _split_unit_from_line(addr1: str) -> Tuple[str,str]:
+def _strip_trailing_city_state_zip(addr1: str) -> str:
+    s = (addr1 or "").strip()
+    if not s:
+        return s
+    if _CITY_ST_ZIP_TAIL.search(s):
+        s = _CITY_ST_ZIP_TAIL.sub("", s).rstrip(" ,.-")
+    return s
+
+def _looks_like_house_number_only(s: str) -> bool:
+    return bool(re.fullmatch(r"\d{1,8}", (s or "").strip()))
+
+def _split_unit_from_line(addr1: str) -> Tuple[str, str]:
     s = (addr1 or "").strip()
     if not s:
         return "", ""
@@ -56,18 +71,6 @@ def _split_unit_from_line(addr1: str) -> Tuple[str,str]:
     street = s[: m.start()].rstrip(" ,.-")
     return street, unit
 
-def _strip_trailing_city_state_zip(addr1: str) -> str:
-    s = (addr1 or "").strip()
-    if not s:
-        return s
-    # remove a trailing "..., City, ST 12345" if someone jammed a full address into addr1
-    if _CITY_ST_ZIP_TAIL.search(s):
-        s = _CITY_ST_ZIP_TAIL.sub("", s).rstrip(" ,.-")
-    return s
-
-def _looks_like_house_number_only(s: str) -> bool:
-    return bool(re.fullmatch(r"\d{1,8}", (s or "").strip()))
-
 def _city_has_streety_bits(city: str) -> bool:
     if not isinstance(city, str): return False
     t = re.findall(r"[A-Za-z0-9#']+", city.lower())
@@ -75,48 +78,66 @@ def _city_has_streety_bits(city: str) -> bool:
     has_street_word = any(tok in _STREET_WORDS for tok in t)
     return has_street_word or has_num
 
-def _extract_street_from_city(city: str) -> Tuple[str, str]:
+def _extract_street_from_city_loose(city: str, true_city_guess: str) -> Tuple[str, str]:
     """
-    If the 'city' field mistakenly contains street/unit + proper city/state/zip,
-    try to separate: return (street_unit_part, cleaned_city_part).
-    Examples city inputs:
-      "Riverside Cir Unit B Richardson, TX 75006"
-      "5208 Riverside Cir, Apt 2, Richardson TX 75006"
+    Try to split a city cell that actually contains "street + city":
+      e.g. "Cedar Ln Garland" -> ("Cedar Ln", "Garland")
+    Strategy:
+      - Prefer splitting before the LAST token(s) that look like a city name (Titlecase, not a street word).
+      - If a 'true_city_guess' is supplied (the same field, but used as a tail), split at its last occurrence.
+      - Fallback: if commas exist, split at the last comma.
     """
     s = (city or "").strip()
     if not s:
         return "", ""
-    # Try to split off a "real city/state/zip" tail
-    # Heuristic: find last occurrence of ", XX 12345" or " XX 12345"
-    m = re.search(r"(.+?)[, ]+\s*([A-Za-z .'\-]+)\s*,?\s*([A-Z]{2})\s+(\d{5}(?:-\d{4})?)\s*$", s)
-    if m:
-        street_part = m.group(1).strip(" ,.-")
-        city_clean  = m.group(2).strip()
-        return street_part, city_clean
-    # If we cannot find state/zip, but there are commas, assume last comma separates city tail
+    # If we can find the last occurrence of the tail city token, split there.
+    if true_city_guess and true_city_guess in s and true_city_guess != s:
+        head = s[: s.rfind(true_city_guess)].rstrip(" ,.-")
+        tail = true_city_guess
+        if head and tail:
+            return head, tail
+    # Token-based heuristic: assume trailing 1–2 tokens form the city name
+    toks = re.findall(r"[A-Za-z0-9']+", s)
+    if len(toks) >= 2:
+        # Try last one as city
+        last = toks[-1]
+        if last.isalpha() and last[0].isupper() and last.lower() not in _STREET_WORDS:
+            head = " ".join(toks[:-1]).strip()
+            tail = last
+            if head and tail:
+                return head, tail
+        # Try last two as city (e.g., "San Marcos")
+        last2 = " ".join(toks[-2:])
+        if all(x.isalpha() and x[0].isupper() for x in toks[-2:]):
+            head = " ".join(toks[:-2]).strip()
+            tail = last2
+            if head and tail:
+                return head, tail
+    # Comma heuristic
     if "," in s:
         head, tail = s.rsplit(",", 1)
         return head.strip(" ,.-"), tail.strip()
-    # Fallback: no clear delimiter -> nothing to extract
+    # Nothing clear
     return "", s
 
-def _format_addr_with_unit(addr1: str, addr2: str, city_for_rescue: str = "") -> str:
+def _format_addr_with_unit(addr1: str, addr2: str, mail_city: str = "", mail_state: str = "", mail_zip: str = "") -> str:
     """
     Display: 'street, UNIT' (if we detect explicit or inline unit).
-    Also rescues cases where address1 is only a number and the street leaked into the city column.
+    Also rescues cases where addr1 is only a number and street leaked into the "city" cell.
     """
     a1_raw = (addr1 or "").strip()
     a2 = (addr2 or "").strip()
 
-    # Rescue if addr1 is just a number and city contains street-like text
-    if _looks_like_house_number_only(a1_raw) and _city_has_streety_bits(city_for_rescue):
-        street_from_city, _city_clean = _extract_street_from_city(city_for_rescue)
-        if street_from_city:
-            # recompose: "1234 <street_from_city>"
-            a1_raw = (a1_raw + " " + street_from_city).strip()
-
+    # 1) If addr1 has a trailing ", City, ST ZIP", strip it
     a1 = _strip_trailing_city_state_zip(a1_raw)
 
+    # 2) Rescue: addr1 is just a number AND city looks streety -> pull street from city
+    if _looks_like_house_number_only(a1) and _city_has_streety_bits(mail_city):
+        street_from_city, cleaned_city_guess = _extract_street_from_city_loose(mail_city, mail_city)
+        if street_from_city:
+            a1 = (a1 + " " + street_from_city).strip()
+
+    # 3) Attach unit
     if a2:
         street, _ = _split_unit_from_line(a1)
         unit = a2
@@ -128,29 +149,15 @@ def _format_addr_with_unit(addr1: str, addr2: str, city_for_rescue: str = "") ->
 
 def _clean_city_for_display(city: str) -> str:
     """
-    If the city field has accidental street/number junk, try to clean it:
-    - If we can parse "<street>, <City> [ST ZIP]" -> return <City>
-    - Drop leading numbers/street words if they precede a plausible city token
+    If city cell contains street junk, try to keep only the city name.
     """
     s = (city or "").strip()
     if not s:
         return s
-    # Try the same extraction logic
-    street_part, city_clean = _extract_street_from_city(s)
-    if city_clean:
+    street_part, city_clean = _extract_street_from_city_loose(s, s)
+    if city_clean and city_clean != s:
         return city_clean
-    # Remove leading house numbers and street tokens
-    toks = re.findall(r"[A-Za-z0-9']+", s)
-    out = []
-    dropped = True
-    for t in toks:
-        low = t.lower()
-        if dropped and (t.isdigit() or low in _STREET_WORDS):
-            continue
-        dropped = False
-        out.append(t)
-    guess = " ".join(out).strip()
-    return guess or s
+    return s
 
 def _format_city_state_zip(city: str, state: str, zipc: str) -> str:
     city = _clean_city_for_display(city)
@@ -164,7 +171,7 @@ def _format_city_state_zip(city: str, state: str, zipc: str) -> str:
         return f"{state} {zipc}".strip()
     return zipc
 
-# ---------- Public API: finalize ----------
+# ---------------- Public API: finalize ----------------
 def finalize_summary_for_export_v17(df: pd.DataFrame) -> pd.DataFrame:
     d = df.copy()
 
@@ -184,7 +191,7 @@ def finalize_summary_for_export_v17(df: pd.DataFrame) -> pd.DataFrame:
         "crm_job_date","crm_amount",
         "address1","address2","city","state","zip",
         "crm_address1","crm_address2","crm_city","crm_state","crm_zip",
-        "confidence","match_notes","mail_count_in_window"
+        "confidence","match_notes","mail_count_in_window","mail_date"
     ]:
         if col not in d.columns:
             d[col] = ""
@@ -208,12 +215,13 @@ def finalize_summary_for_export_v17(df: pd.DataFrame) -> pd.DataFrame:
 
     return d
 
-# ---------- Public API: render ----------
+# ---------------- Public API: render ----------------
 def render_full_dashboard_v17(summary_df: pd.DataFrame,
                               mail_total_count: Optional[int] = None,
                               **_ignore) -> str:
     d = summary_df.copy()
 
+    # KPIs
     total_mail = int(mail_total_count) if mail_total_count not in (None, "") else ""
     total_matches = len(d)
     total_revenue = d["crm_amount"].map(_money_to_float).sum()
@@ -228,6 +236,7 @@ def render_full_dashboard_v17(summary_df: pd.DataFrame,
     if total_mail and total_matches:
         mailers_per_acq = total_mail / total_matches
 
+    # Top lists
     safe_city = d.get("crm_city", "").fillna("")
     safe_state = d.get("crm_state", "").fillna("")
     safe_zip = d.get("crm_zip", "").fillna("")
@@ -244,6 +253,7 @@ def render_full_dashboard_v17(summary_df: pd.DataFrame,
                     .reset_index(name="matches")
                     .sort_values("matches", ascending=False).head(5))
 
+    # Monthly chart (vertical bars, months on X)
     mdates = pd.to_datetime(d.get("crm_job_date", ""), errors="coerce")
     monthly_counts = (pd.DataFrame({"month": mdates})
                         .dropna()
@@ -268,6 +278,7 @@ def render_full_dashboard_v17(summary_df: pd.DataFrame,
     month_png_b64 = base64.b64encode(bio.getvalue()).decode("ascii")
     month_img_tag = f'<img alt="Matched jobs by month" src="data:image/png;base64,{month_png_b64}" style="width:100%;max-width:1000px;">'
 
+    # CSS
     css = """
     <style>
       :root { --brand:#0c2d4e; --accent:#759d40; --on-brand:#fff; --text:#0f172a; --muted:#64748b; --border:#e5e7eb; }
@@ -288,6 +299,7 @@ def render_full_dashboard_v17(summary_df: pd.DataFrame,
     </style>
     """
 
+    # KPIs
     kpi_items = [
         f'<div class="card"><div class="k">Total mail records</div><div class="v">{_esc(total_mail)}</div></div>',
         f'<div class="card"><div class="k">Matches</div><div class="v">{total_matches}</div></div>',
@@ -299,6 +311,7 @@ def render_full_dashboard_v17(summary_df: pd.DataFrame,
         kpi_items.append(f'<div class="card"><div class="k">Mailers per acquisition</div><div class="v">{mailers_per_acq:.2f}</div></div>')
     kpis_html = f'<div class="grid">{"".join(kpi_items)}</div>'
 
+    # Lists + Chart
     def _city_ul(df):
         items = []
         for _, r in df.iterrows():
@@ -328,12 +341,13 @@ def render_full_dashboard_v17(summary_df: pd.DataFrame,
       </div>
     """
 
-    # Sort by most recent CRM date; if missing, fallback to mail date if present
+    # Sort by most recent CRM date; fallback to mail date
     d["_crm_dt"] = pd.to_datetime(d.get("crm_job_date",""), errors="coerce")
     d["_mail_dt"] = pd.to_datetime(d.get("mail_date",""), errors="coerce")
     d["_sort_dt"] = d["_crm_dt"].fillna(d["_mail_dt"])
     d = d.sort_values("_sort_dt", ascending=False)
 
+    # Table
     head = """
       <table>
         <thead>
@@ -350,10 +364,16 @@ def render_full_dashboard_v17(summary_df: pd.DataFrame,
         </thead>
         <tbody>
     """
-    rows_html = []
+    rows_html: List[str] = []
     for _, r in d.head(200).iterrows():
-        mail_addr = _format_addr_with_unit(r.get("address1",""), r.get("address2",""), r.get("city",""))
-        crm_addr  = _format_addr_with_unit(r.get("crm_address1",""), r.get("crm_address2",""), r.get("crm_city",""))
+        mail_addr = _format_addr_with_unit(
+            r.get("address1",""), r.get("address2",""),
+            r.get("city",""), r.get("state",""), r.get("zip","")
+        )
+        crm_addr  = _format_addr_with_unit(
+            r.get("crm_address1",""), r.get("crm_address2",""),
+            r.get("crm_city",""), r.get("crm_state",""), r.get("crm_zip","")
+        )
         rows_html.append(f"""
           <tr>
             <td>{_esc(r.get('crm_job_date',''))}</td>
