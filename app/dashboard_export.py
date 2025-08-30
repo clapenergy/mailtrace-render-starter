@@ -1,13 +1,12 @@
 # app/dashboard_export.py — KPIs + Top Cities/Zips + Month Chart + Date/Amount table
-# Adds KPIs:
-# - Mailers per Match (total_mail / total_matches)
-# - Avg. Mailers Before First Response (count mailers to same normalized address with mail_date < crm_job_date, averaged)
+# Optimized "Avg. Mailers Before First Response" (vectorized per-stem date arrays + searchsorted).
 
 from html import escape
 import io
 import base64
 import re
 import pandas as pd
+import numpy as np
 
 import matplotlib
 matplotlib.use("Agg")
@@ -149,19 +148,20 @@ def _matches_by_month_chart_uri(df: pd.DataFrame) -> str:
     b64 = base64.b64encode(buf.read()).decode("ascii")
     return f"data:image/png;base64,{b64}"
 
-# ---- KPI calcs that need full mail file ----
+# ---- Optimized KPI: Avg. Mailers Before First Response ----
 
 def _avg_mailers_before_first_response(matches_df: pd.DataFrame, mail_all_df: pd.DataFrame) -> float | None:
     """
     For each matched row, count how many mailers to the same normalized address stem
-    have mail_date strictly before that row's crm_job_date. Then average across matches.
+    have mail_date strictly before that row's crm_job_date; average across matches.
+    Optimized using per-stem sorted numpy arrays + searchsorted (no Python loops over groups).
     """
     if matches_df is None or matches_df.empty or mail_all_df is None or mail_all_df.empty:
         return None
 
     mail_copy = mail_all_df.copy()
 
-    # find a mail address column in uploaded mail file
+    # address column in uploaded mail file
     for candidate in ["Address1", "Address", "MailAddress1", "address1"]:
         if candidate in mail_copy.columns:
             mail_addr_col = candidate
@@ -169,7 +169,7 @@ def _avg_mailers_before_first_response(matches_df: pd.DataFrame, mail_all_df: pd
     else:
         return None
 
-    # find a mail date column
+    # date column in uploaded mail file
     for dcol in ["MailDate", "Mailed", "Date", "Mail Date", "mail_date"]:
         if dcol in mail_copy.columns:
             mail_date_col = dcol
@@ -177,32 +177,46 @@ def _avg_mailers_before_first_response(matches_df: pd.DataFrame, mail_all_df: pd
     else:
         return None
 
+    # Build normalized stem + datetime for all mail
     mail_copy["_stem"] = mail_copy[mail_addr_col].astype(str).map(lambda a: normalize_address1(a)["stem"])
     mail_copy["_mail_dt"] = pd.to_datetime(mail_copy[mail_date_col], errors="coerce", utc=False)
 
+    # Drop bad rows and pack per-stem sorted arrays of datetimes
+    mc = mail_copy.dropna(subset=["_stem", "_mail_dt"]).copy()
+    if mc.empty:
+        return None
+
+    # Group once, then convert each group's dates to a sorted numpy array
+    stem_to_dates = {}
+    for stem, grp in mc.groupby("_stem", sort=False):
+        arr = np.sort(grp["_mail_dt"].to_numpy(dtype="datetime64[ns]"))
+        stem_to_dates[stem] = arr
+
+    # Prepare matches data (stems + crm datetimes)
     mx = matches_df.copy()
     mx["_stem"] = mx["address1"].astype(str).map(lambda a: normalize_address1(a)["stem"])
     mx["_crm_dt"] = pd.to_datetime(mx["crm_job_date"], errors="coerce", utc=False)
-
     mx = mx[(mx["_stem"].astype(str).str.len() > 0) & (mx["_crm_dt"].notna())]
-    if mx.empty or mail_copy.empty:
+    if mx.empty:
         return None
 
-    mail_groups = mail_copy.dropna(subset=["_stem"]).groupby("_stem", sort=False)
-
+    # Vectorized: for each match row, do a binary search on that stem's array to count
     counts = []
     for _, r in mx.iterrows():
         stem = r["_stem"]
-        crm_dt = r["_crm_dt"]
-        if stem in mail_groups.indices:
-            grp = mail_groups.get_group(stem)
-            cnt = int((grp["_mail_dt"] < crm_dt).sum())
+        crm_dt = np.datetime64(r["_crm_dt"].to_datetime64())  # ensure numpy dtype
+        arr = stem_to_dates.get(stem)
+        if arr is None or arr.size == 0:
+            counts.append(0)
+        else:
+            # number of mail dates strictly before crm_dt
+            cnt = int(np.searchsorted(arr, crm_dt, side="left"))
             counts.append(cnt)
 
     if not counts:
         return None
 
-    return round(sum(counts) / len(counts), 2)
+    return round(float(np.mean(counts)), 2)
 
 def _mailers_per_match(total_mail: int, total_matches: int) -> float | str:
     if not total_matches:
