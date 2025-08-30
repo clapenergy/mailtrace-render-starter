@@ -1,5 +1,6 @@
 # app/mailtrace_matcher.py
-# Dashboard-v4: fuzzy matching with explicit unit penalties baked into confidence
+# Dashboard-v4.2: fuzzy matching + unit penalties + geo mismatch notes (city/state/zip)
+
 from __future__ import annotations
 import re
 from datetime import datetime, date
@@ -138,6 +139,9 @@ def address_similarity(a1: str, b1: str) -> float:
     if not na or not nb: return 0.0
     return _ratio(na, nb)
 
+def _first5_zip(z: str) -> str:
+    return re.sub(r"[^0-9]", "", str(z))[:5]
+
 def score_row(mail_row: pd.Series, crm_row: pd.Series) -> Tuple[int, List[str]]:
     """Return (confidence_0_100, mismatch_notes[]) for a mail ↔ CRM candidate pair."""
     a_mail = str(mail_row.get("address1", ""))
@@ -146,57 +150,62 @@ def score_row(mail_row: pd.Series, crm_row: pd.Series) -> Tuple[int, List[str]]:
     score = int(round(sim * 100))                # 0..100 base
 
     # Bonuses for geo (capped at 100)
-    mz = str(mail_row.get("postal_code", "")).strip()
-    cz = str(crm_row.get("postal_code", "")).strip()
-    if mz[:5] and cz[:5] and mz[:5] == cz[:5]:
+    m_zip5 = _first5_zip(mail_row.get("postal_code", ""))
+    c_zip5 = _first5_zip(crm_row.get("postal_code", ""))
+    if m_zip5 and c_zip5 and m_zip5 == c_zip5:
         score = min(100, score + 5)
 
-    if str(mail_row.get("city", "")).strip().lower() == str(crm_row.get("city", "")).strip().lower():
+    m_city = str(mail_row.get("city", "")).strip().lower()
+    c_city = str(crm_row.get("city", "")).strip().lower()
+    if m_city and c_city and m_city == c_city:
         score = min(100, score + 2)
 
-    if str(mail_row.get("state", "")).strip().lower() == str(crm_row.get("state", "")).strip().lower():
+    m_state = str(mail_row.get("state", "")).strip().lower()
+    c_state = str(crm_row.get("state", "")).strip().lower()
+    if m_state and c_state and m_state == c_state:
         score = min(100, score + 2)
 
     notes: List[str] = []
 
-    # Street-type note (kept as note only; similarity usually captures this)
+    # Street-type / direction notes
     ta, tb = tokens(a_crm), tokens(a_mail)
     st_a, st_b = street_type_of(ta), street_type_of(tb)
     if st_a != st_b and (st_a or st_b):
         notes.append(f"{st_b or 'none'} vs {st_a or 'none'} (street type)")
 
-    # Directional note (e.g., N, S)
     dir_a, dir_b = directional_in(ta), directional_in(tb)
     if dir_a != dir_b and (dir_a or dir_b):
         notes.append(f"{dir_b or 'none'} vs {dir_a or 'none'} (direction)")
 
-    # ---- NEW: Unit penalties that affect score ----
+    # ---- Unit penalties that affect score ----
     unit_a = str(crm_row.get("address2", "") or "").strip()
     unit_b = str(mail_row.get("address2", "") or "").strip()
     lab_a, num_a = normalize_unit_text(unit_a)
     lab_b, num_b = normalize_unit_text(unit_b)
 
     if not num_a and not num_b:
-        # no units on either side -> no penalty
-        pass
+        pass  # no units -> no penalty
     elif (num_a and not num_b) or (num_b and not num_a):
-        # one side has a unit, the other does not -> medium penalty
         score = max(0, score - 10)
         notes.append(f"{unit_b or 'none'} vs {unit_a or 'none'} (unit)")
     else:
-        # both sides have a unit number; compare normalized numbers (labels don't matter)
         if num_a != num_b:
-            score = max(0, score - 18)  # significant penalty
+            score = max(0, score - 18)  # significant penalty for mismatched unit numbers
             notes.append(f"{unit_b or 'none'} vs {unit_a or 'none'} (unit)")
         else:
-            # numbers match -> no penalty; keep note only if labels are wildly different (optional)
             if lab_a != lab_b and (lab_a or lab_b):
-                # You can comment this out if you don't want a note for label differences
                 notes.append(f"{(lab_b + ' ' + num_b).strip()} vs {(lab_a + ' ' + num_a).strip()} (unit label)")
+
+    # ---- NEW: Geo mismatch notes (don’t change score; just explain) ----
+    if m_city and c_city and m_city != c_city:
+        notes.append(f"{mail_row.get('city','')} vs {crm_row.get('city','')} (city)")
+    if m_state and c_state and m_state != c_state:
+        notes.append(f"{mail_row.get('state','')} vs {crm_row.get('state','')} (state)")
+    if m_zip5 and c_zip5 and m_zip5 != c_zip5:
+        notes.append(f"{m_zip5} vs {c_zip5} (zip)")
 
     # Cap score 0..100
     score = max(0, min(100, score))
-
     if score >= 100 and not notes:
         return 100, ["perfect match"]
     return score, notes
@@ -322,7 +331,6 @@ def run_matching_from_csv(mail_csv: str, crm_csv: str) -> pd.DataFrame:
     return run_matching(mail, crm)
 
 if __name__ == "__main__":
-    # Minimal CLI behavior when run directly:
     import argparse
     p = argparse.ArgumentParser(description="MailTrace matching logic (summary CSV to stdout).")
     p.add_argument("--mail", required=True, help="Path to mail CSV")
