@@ -134,7 +134,7 @@ def finalize_summary_for_export_v17(df: pd.DataFrame, **_ignore) -> pd.DataFrame
         axis=1
     )
 
-    # Add normalized city/state for robust counts (strip trailing periods/whitespace)
+    # Normalized fields for robust groupings
     d["_crm_city_norm"] = d["crm_city"].astype(str).str.strip().str.rstrip(".")
     d["_crm_state_norm"] = d["crm_state"].astype(str).str.strip().str.upper()
 
@@ -164,13 +164,12 @@ def render_full_dashboard_v17(
     total_revenue = d["crm_amount"].map(_to_float).sum()
 
     # ---- Top cities/zips (robust) ----
-    # count by normalized city/state
     city_counts = (
         d.groupby(["_crm_city_norm","_crm_state_norm"], dropna=False)
           .size().reset_index(name="matches")
           .rename(columns={"_crm_city_norm":"city","_crm_state_norm":"state"})
           .sort_values(["matches","city","state"], ascending=[False, True, True])
-          .head(50)  # keep up to 50, we'll show 5 with a scrollbar
+          .head(50)  # keep up to 50, we’ll show 5 with a scrollbar
     )
     zip_counts = (
         d.groupby(["crm_zip"], dropna=False)
@@ -180,10 +179,10 @@ def render_full_dashboard_v17(
           .head(50)
     )
 
-    # ---- Monthly matches (by CRM job month, chronological) ----
+    # ---- Monthly matches (chronological) ----
     dm = d.dropna(subset=["_crm_dt"]).copy()
     if not dm.empty:
-        dm["month"] = dm["_crm_dt"].dt.to_period("M").dt.to_timestamp()  # month start
+        dm["month"] = dm["_crm_dt"].dt.to_period("M").dt.to_timestamp()
         monthly = (
             dm.groupby("month").size().reset_index(name="matches")
               .sort_values("month")
@@ -191,16 +190,52 @@ def render_full_dashboard_v17(
     else:
         monthly = pd.DataFrame(columns=["month","matches"])
 
+    # ----- Layout CSS (inline so you don't have to touch style.css) -----
+    styles = """
+    <style>
+      /* KPI row */
+      .kpi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap:16px; }
+
+      /* Analytics row: chart wide left, two stacked cards right */
+      .analytics-grid {
+        display: grid;
+        grid-template-columns: 2fr 1fr;
+        grid-template-areas:
+          "chart side";
+        gap:16px;
+      }
+      .analytics-chart { grid-area: chart; display:flex; flex-direction:column; gap:10px; }
+      .analytics-side { grid-area: side; display:grid; grid-template-rows: auto auto; gap:16px; }
+
+      @media (max-width: 900px) {
+        .analytics-grid {
+          grid-template-columns: 1fr;
+          grid-template-areas:
+            "chart"
+            "side";
+        }
+      }
+
+      /* Scrollable lists show ~5 items */
+      .kvlist { list-style:none; margin:0; padding:0; }
+      .kvlist li {
+        display:flex; align-items:center; justify-content:space-between;
+        padding:8px 0; border-bottom:1px solid #f1f5f9; font-weight:600;
+      }
+      .scrollbox { max-height:220px; overflow-y:auto; padding-right:6px; }
+    </style>
+    """
+
     # KPI HTML
     kpi_html = f"""
-    <div class="grid">
+    <div class="kpi-grid">
       <div class="card kpi"><div class="k">Total mail records</div><div class="v">{esc(total_mail)}</div></div>
       <div class="card kpi"><div class="k">Matches</div><div class="v">{total_matches}</div></div>
       <div class="card kpi"><div class="k">Total revenue</div><div class="v">${total_revenue:,.2f}</div></div>
     </div>
     """
 
-    # Top cities/zips HTML — scrollable, only 5 visible
+    # Top cities/zips lists (scrollable)
     def _city_list(df):
         items = []
         for _, r in df.iterrows():
@@ -220,31 +255,6 @@ def render_full_dashboard_v17(
             items = ["<li><span>—</span><strong>0</strong></li>"]
         return "<ul class='kvlist'>" + "".join(items) + "</ul>"
 
-    top_html = f"""
-    <style>
-      .kvlist {{ list-style:none; margin:0; padding:0; }}
-      .kvlist li {{
-        display:flex; align-items:center; justify-content:space-between;
-        padding:8px 0; border-bottom:1px solid #f1f5f9; font-weight:600;
-      }}
-      .scrollbox {{
-        max-height: 220px;   /* ~5 rows visible */
-        overflow-y: auto;
-        padding-right: 6px;
-      }}
-    </style>
-    <div class="grid">
-      <div class="card">
-        <div class="k">Top Cities</div>
-        <div class="scrollbox">{_city_list(city_counts)}</div>
-      </div>
-      <div class="card">
-        <div class="k">Top ZIPs</div>
-        <div class="scrollbox">{_zip_list(zip_counts)}</div>
-      </div>
-    </div>
-    """
-
     # Monthly mini bars (chronological)
     bars = []
     if not monthly.empty:
@@ -262,13 +272,27 @@ def render_full_dashboard_v17(
                 <div style="width:50px; text-align:right; font-weight:800">{v}</div>
               </div>
             """)
-    month_html = f"""
-      <div class="card">
+
+    # Assemble analytics row (chart left, lists right)
+    analytics_html = f"""
+    <div class="analytics-grid">
+      <div class="card analytics-chart">
         <div class="k">Matched jobs by month</div>
         <div style="display:flex; flex-direction:column; gap:8px; margin-top:10px;">
           {''.join(bars) if bars else '<div class="note">No dated matches</div>'}
         </div>
       </div>
+      <div class="analytics-side">
+        <div class="card">
+          <div class="k">Top Cities</div>
+          <div class="scrollbox">{_city_list(city_counts)}</div>
+        </div>
+        <div class="card">
+          <div class="k">Top ZIPs</div>
+          <div class="scrollbox">{_zip_list(zip_counts)}</div>
+        </div>
+      </div>
+    </div>
     """
 
     # Summary table
@@ -305,13 +329,13 @@ def render_full_dashboard_v17(
 
     table_html = head + "\n".join(rows_html) + "\n</tbody></table>"
 
-    html_out = f"""
-    <div class="grid">
-      {kpi_html}
-      {top_html}
-      {month_html}
-    </div>
-    <div style="margin-top:18px;" class="note">Sample of Matches<br/>Sorted by most recent CRM date (falls back to mail date).</div>
-    <div style="margin-top:8px;">{table_html}</div>
-    """
+    # Put it all together
+    html_out = (
+        styles
+        + kpi_html
+        + analytics_html
+        + """
+        <div style="margin-top:18px;" class="note">Sample of Matches<br/>Sorted by most recent CRM date (falls back to mail date).</div>
+        <div style="margin-top:8px;">""" + table_html + "</div>"
+    )
     return html_out
