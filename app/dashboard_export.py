@@ -1,5 +1,4 @@
-# app/dashboard_export.py - CLEAN VERSION (fixes f-string and data mapping issues)
-
+# app/dashboard_export.py - COMPLETE FILE with minimal fix
 from __future__ import annotations
 import math, re
 import pandas as pd
@@ -35,147 +34,88 @@ def _escape(s: str) -> str:
         return ""
     return str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
-def _get_column_flexible(df, *names):
-    """Find column by trying multiple name variations"""
-    cols = df.columns.str.lower().str.strip()
-    for name in names:
-        name_lower = str(name).lower().strip()
-        # Exact match first
-        matches = df.columns[cols == name_lower]
-        if len(matches) > 0:
-            return matches[0]
-        # Partial match
-        matches = df.columns[cols.str.contains(name_lower, na=False)]
-        if len(matches) > 0:
-            return matches[0]
-    return None
-
 def finalize_summary_for_export_v17(summary: pd.DataFrame) -> pd.DataFrame:
     """Convert raw pipeline output to standardized format for dashboard"""
     
     if summary.empty:
-        # Return empty but valid structure
         return pd.DataFrame({
-            "Mail Dates": [],
-            "CRM Date": [],
-            "Amount": [],
-            "Mail Address": [],
-            "Mail City/State/Zip": [],
-            "CRM Address": [],
-            "CRM City/State/Zip": [],
-            "Confidence": [],
-            "Notes": []
+            "Mail Dates": [], "CRM Date": [], "Amount": [], "Mail Address": [],
+            "Mail City/State/Zip": [], "CRM Address": [], "CRM City/State/Zip": [],
+            "Confidence": [], "Notes": []
         })
     
     df = summary.copy()
     
-    # Helper function to safely get series
-    def get_series(df, *col_names, default=""):
-        col = _get_column_flexible(df, *col_names)
-        if col:
-            return df[col].fillna(default).astype(str)
-        return pd.Series([default] * len(df), index=df.index)
+    # FIXED: Use exact column names from your matching output
+    mail_dates = df.get("mail_dates_in_window", pd.Series([""] * len(df)))
+    crm_dates = df.get("crm_job_date", pd.Series([""] * len(df)))
+    amounts = df.get("crm_amount", pd.Series([""] * len(df))).apply(_fmt_currency)
+    mail_addrs = df.get("matched_mail_full_address", pd.Series([""] * len(df)))
     
-    # BRUTE FORCE: Check every single column for mail dates
-    mail_dates = pd.Series([""] * len(df))
+    # CRM address components
+    crm_addr1 = df.get("crm_address1_original", pd.Series([""] * len(df)))
+    crm_addr2 = df.get("crm_address2_original", pd.Series([""] * len(df)))
     
-    print("DEBUG - ALL COLUMNS:", list(df.columns))
+    # Build full CRM address
+    def build_crm_address(addr1, addr2):
+        addr1 = str(addr1 or "").strip()
+        addr2 = str(addr2 or "").strip()
+        if addr2:
+            return f"{addr1}, {addr2}"
+        return addr1
     
-    # Try every column that might contain mail dates
-    for col in df.columns:
-        col_lower = str(col).lower()
-        if any(keyword in col_lower for keyword in ["mail", "date", "sent", "window", "history"]):
-            sample_val = str(df[col].iloc[0]) if len(df) > 0 else ""
-            print(f"CHECKING COLUMN '{col}': Sample = '{sample_val}'")
-            
-            # If this column has comma-separated dates, use it
-            if "," in sample_val or any(char.isdigit() for char in sample_val):
-                print(f"USING COLUMN '{col}' for mail dates")
-                
-                def format_mail_dates(date_string):
-                    if not date_string or str(date_string).strip() in ["", "None provided", "none", "nan"]:
-                        return ""
-                    
-                    date_str = str(date_string).strip()
-                    # If it's already a single date, return it
-                    if re.match(r'\d{2}-\d{2}-\d{2}', date_str) and ',' not in date_str:
-                        return date_str
-                    
-                    # Split comma-separated dates and clean them up
-                    dates = [d.strip() for d in date_str.split(",") if d.strip()]
-                    dates = [d for d in dates if d not in ["None provided", "none", "None", "nan"]]
-                    
-                    if not dates:
-                        return ""
-                    
-                    # Show first few dates
-                    if len(dates) <= 3:
-                        return ", ".join(dates)
-                    else:
-                        return f"{', '.join(dates[:2])}, +{len(dates)-2} more"
-                
-                mail_dates = df[col].apply(format_mail_dates)
-                break
-    crm_dates = get_series(df, "crm_job_date", "crm_date", "job_date")
-    amounts = get_series(df, "crm_amount", "amount", "job_value", "revenue")
+    crm_full_addr = pd.Series([
+        build_crm_address(a1, a2) 
+        for a1, a2 in zip(crm_addr1, crm_addr2)
+    ])
     
-    # Addresses
-    mail_addrs = get_series(df, "matched_mail_full_address", "mail_address", "address1")
-    crm_addr1 = get_series(df, "crm_address1_original", "crm_address1", "crm_street")
-    crm_addr2 = get_series(df, "crm_address2_original", "crm_address2", "crm_unit")
+    # CRM geography
+    crm_city = df.get("crm_city", pd.Series([""] * len(df)))
+    crm_state = df.get("crm_state", pd.Series([""] * len(df)))
+    crm_zip = df.get("crm_zip", pd.Series([""] * len(df)))
     
-    # Geography
-    crm_city = get_series(df, "crm_city", "city")
-    crm_state = get_series(df, "crm_state", "state")
-    crm_zip = get_series(df, "crm_zip", "zip", "zipcode")
-    
-    # Build CRM address
-    crm_full_addr = crm_addr1.copy()
-    has_unit = crm_addr2.str.strip() != ""
-    crm_full_addr[has_unit] = crm_addr1[has_unit] + ", " + crm_addr2[has_unit]
-    
-    # Build CRM geography
-    crm_geography = crm_city + ", " + crm_state + " " + crm_zip
-    crm_geography = crm_geography.str.replace(", ,", ",").str.replace("  ", " ").str.strip(" ,")
+    crm_geography = pd.Series([
+        f"{city}, {state} {zip_code}".strip(", ") 
+        for city, state, zip_code in zip(crm_city, crm_state, crm_zip)
+    ])
     
     # Confidence and notes
-    confidence = get_series(df, "confidence_percent", "confidence", "score").apply(lambda x: _safe_int(x, 0))
-    notes = get_series(df, "match_notes", "notes")
+    confidence = df.get("confidence_percent", pd.Series([0] * len(df))).apply(lambda x: _safe_int(x, 0))
+    notes = df.get("match_notes", pd.Series([""] * len(df)))
     
-    # Build the final dataframe
+    # Build final result
     result = pd.DataFrame({
         "Mail Dates": mail_dates,
-        "CRM Date": crm_dates, 
-        "Amount": amounts.apply(_fmt_currency),
+        "CRM Date": crm_dates,
+        "Amount": amounts,
         "Mail Address": mail_addrs,
-        "Mail City/State/Zip": "",  # Usually not available in pipeline output
+        "Mail City/State/Zip": "",
         "CRM Address": crm_full_addr,
         "CRM City/State/Zip": crm_geography,
         "Confidence": confidence,
         "Notes": notes
-    }, index=df.index)
+    })
     
-    # Store raw amounts for KPI calculations
-    raw_amounts = amounts.apply(_safe_float)
+    # Store aux data for KPIs (keep your existing logic)
+    raw_amounts = df.get("crm_amount", pd.Series([0] * len(df))).apply(_safe_float)
     result.__aux_amounts = raw_amounts
     result.__aux_crm_city = crm_city
-    result.__aux_crm_state = crm_state  
+    result.__aux_crm_state = crm_state
     result.__aux_crm_zip = crm_zip
     
-    # Parse dates for monthly chart
-    def parse_date(date_str):
+    # Parse dates for charts
+    def safe_date_parse(date_str):
         try:
-            if not date_str or str(date_str).strip() == "":
+            if not date_str or str(date_str).strip() in ["", "None provided"]:
                 return pd.NaT
-            # Handle dd-mm-yy format from your matcher
             date_str = str(date_str).strip()
             if re.match(r'\d{2}-\d{2}-\d{2}', date_str):
-                return pd.to_datetime(date_str, format='%d-%m-%y', errors='coerce')
+                return pd.to_datetime(date_str, format='%d-%m-%y')
             return pd.to_datetime(date_str, errors='coerce')
         except:
             return pd.NaT
     
-    result.__aux_dates = crm_dates.apply(parse_date)
+    result.__aux_dates = crm_dates.apply(safe_date_parse)
     
     return result
 
@@ -197,11 +137,8 @@ def render_full_dashboard_v17(summary_df: pd.DataFrame, mail_total_count: int) -
         total_revenue = 0.0
     
     # Calculate KPIs safely
-    avg_mailers = 0.0  # We don't have this data in current pipeline
-    if total_matches > 0:
-        mailers_per_acq = total_mail / total_matches
-    else:
-        mailers_per_acq = 0.0
+    avg_mailers = 0.0
+    mailers_per_acq = (total_mail / total_matches) if total_matches > 0 else 0.0
     
     # Top cities and zips
     try:
@@ -209,7 +146,6 @@ def render_full_dashboard_v17(summary_df: pd.DataFrame, mail_total_count: int) -
         crm_states = getattr(summary_df, '__aux_crm_state', pd.Series([""]))  
         crm_zips = getattr(summary_df, '__aux_crm_zip', pd.Series([""]))
         
-        # Create city, state combinations
         city_state = (crm_cities + ", " + crm_states).str.strip(", ")
         top_cities = city_state[city_state != ""].value_counts().head(5)
         top_zips = crm_zips[crm_zips.str.strip() != ""].value_counts().head(5)
@@ -255,7 +191,7 @@ def render_full_dashboard_v17(summary_df: pd.DataFrame, mail_total_count: int) -
         </tr>
         """)
     
-    # Helper functions for lists and charts
+    # Helper functions
     def render_top_list(data_series):
         if len(data_series) == 0:
             return "<div style='padding: 20px; text-align: center; color: #64748b;'>No data</div>"
@@ -276,16 +212,15 @@ def render_full_dashboard_v17(summary_df: pd.DataFrame, mail_total_count: int) -
         
         max_val = max(month_data.values) if len(month_data) > 0 else 1
         
-        # Create horizontal chart with months on x-axis
+        # Horizontal chart with months on x-axis
         chart_html = """
         <div style="display: flex; flex-direction: column; gap: 8px;">
             <div style="display: flex; align-items: end; gap: 4px; height: 200px; padding: 10px; border-bottom: 2px solid #e5e7eb;">
         """
         
-        # Create bars for each month
         for month, count in month_data.items():
             height = int((count / max_val) * 160) if max_val > 0 else 0
-            height = max(height, 8)  # Minimum height for visibility
+            height = max(height, 8)
             
             chart_html += f"""
                 <div style="display: flex; flex-direction: column; align-items: center; flex: 1;">
@@ -299,7 +234,6 @@ def render_full_dashboard_v17(summary_df: pd.DataFrame, mail_total_count: int) -
             <div style="display: flex; gap: 4px;">
         """
         
-        # Add month labels at bottom
         for month, count in month_data.items():
             chart_html += f"""
                 <div style="flex: 1; text-align: center; font-size: 11px; color: #64748b; transform: rotate(-45deg); transform-origin: center;">{month}</div>
