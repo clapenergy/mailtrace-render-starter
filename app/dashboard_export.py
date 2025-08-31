@@ -76,8 +76,23 @@ def finalize_summary_for_export_v17(summary: pd.DataFrame) -> pd.DataFrame:
             return df[col].fillna(default).astype(str)
         return pd.Series([default] * len(df), index=df.index)
     
-    # Extract all the fields we need
-    raw_mail_dates = get_series(df, "mail_dates_in_window", "mail_dates", "mail_history")
+    # DEBUG: Check what columns we actually have
+    print("AVAILABLE COLUMNS:", list(df.columns))
+    
+    # Extract mail dates with explicit debugging
+    mail_dates_col = None
+    for col_name in ["mail_dates_in_window", "mail_dates", "mail_history", "mail_dates_list"]:
+        if col_name in df.columns:
+            mail_dates_col = col_name
+            print(f"FOUND MAIL DATES COLUMN: {col_name}")
+            break
+    
+    if mail_dates_col:
+        raw_mail_dates = df[mail_dates_col].fillna("")
+        print(f"SAMPLE MAIL DATES: {raw_mail_dates.head(3).tolist()}")
+    else:
+        print("NO MAIL DATES COLUMN FOUND!")
+        raw_mail_dates = pd.Series([""] * len(df))
     
     # Format mail dates for display - clean up the comma-separated list
     def format_mail_dates(date_string):
