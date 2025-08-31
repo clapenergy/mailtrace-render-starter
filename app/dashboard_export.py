@@ -77,7 +77,29 @@ def finalize_summary_for_export_v17(summary: pd.DataFrame) -> pd.DataFrame:
         return pd.Series([default] * len(df), index=df.index)
     
     # Extract all the fields we need
-    mail_dates = get_series(df, "mail_dates_in_window", "mail_dates", "mail_history")
+    raw_mail_dates = get_series(df, "mail_dates_in_window", "mail_dates", "mail_history")
+    
+    # Format mail dates for display - clean up the comma-separated list
+    def format_mail_dates(date_string):
+        if not date_string or str(date_string).strip() in ["", "None provided", "none"]:
+            return ""
+        
+        # Split comma-separated dates and clean them up
+        dates = [d.strip() for d in str(date_string).split(",") if d.strip()]
+        # Remove "None provided" entries
+        dates = [d for d in dates if d not in ["None provided", "none", "None"]]
+        
+        if not dates:
+            return ""
+        
+        # If multiple dates, show them in a compact format
+        if len(dates) <= 3:
+            return ", ".join(dates)
+        else:
+            # Show first few dates + count
+            return f"{', '.join(dates[:2])}, +{len(dates)-2} more"
+    
+    mail_dates = raw_mail_dates.apply(format_mail_dates)
     crm_dates = get_series(df, "crm_job_date", "crm_date", "job_date")
     amounts = get_series(df, "crm_amount", "amount", "job_value", "revenue")
     
