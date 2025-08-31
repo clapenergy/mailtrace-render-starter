@@ -1,34 +1,12 @@
-
 <!doctype html>
 <html>
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>MailTrace — Results</title>
-    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
-    <link rel="icon" type="image/png" sizes="16x16" href="{{ url_for('static', filename='favicon-16.png') }}">
-    <link rel="icon" type="image/png" sizes="32x32" href="{{ url_for('static', filename='favicon-32.png') }}">
-    <link rel="icon" type="image/png" sizes="64x64" href="{{ url_for('static', filename='favicon-64.png') }}">
-    <link rel="apple-touch-icon" sizes="180x180" href="{{ url_for('static', filename='favicon-180.png') }}">
-    <link rel="icon" type="image/png" sizes="192x192" href="{{ url_for('static', filename='favicon-192.png') }}">
-    <link rel="icon" type="image/x-icon" href="{{ url_for('static', filename='favicon.ico') }}">
-  </head>
-  <body>
-    <div class="container">
-      <header class="nav">
-        <a href="{{ url_for('index') }}"><img src="{{ url_for('static', filename='logo.png') }}" class="logo" alt="MailTrace logo"></a>
-      </header>
-      <div class="header-accent"></div>
-
-      <div class="card">
-        <!-- We trust the HTML from your v17 renderer (already sanitized on your side) -->
-        {{ dashboard_html | safe }}
-      </div>
-
-      <form class="actions" action="{{ url_for('download') }}" method="POST" style="margin-top:16px;">
-        <button class="button" type="submit">Download All Matches (CSV)</button>
-        <span class="badge">{{ csv_len }} bytes</span>
-      </form>
-    </div>
-  </body>
+<head>
+  <meta charset="utf-8" />
+  <title>MailTrace — Results</title>
+  <link rel="icon" href="/static/favicon.ico">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  {{ dashboard_html }}
+</body>
 </html>
