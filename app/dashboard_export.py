@@ -1,83 +1,11 @@
-# app/dashboard_export.py
-# MailTrace Dashboard Renderer — R8b STABLE (rollback)
-# - Matches the previously approved layout & styling
-# - Robust column detection (case-insensitive)
-# - Tolerant of missing values (shows “No data” rather than crashing)
-# - Horizontal month chart; top 5 cities/zips with scroll
-# - Mail Dates column on far left; confidence color-coded
-# - Unit appended after street with comma when present
+# app/dashboard_export.py - CLEAN VERSION (fixes f-string and data mapping issues)
+
 from __future__ import annotations
 import math, re
 import pandas as pd
 
 BRAND = "#0c2d4e"
 ACCENT = "#759d40"
-
-# ---------- small utils ----------
-def _lower_map(cols):
-    m = {}
-    for c in cols:
-        lc = str(c).strip().lower()
-        if lc not in m:
-            m[lc] = c
-    return m
-
-def _get_col_ci(df: pd.DataFrame, *candidates) -> str | None:
-    m = _lower_map(df.columns)
-    for cand in candidates:
-        lc = str(cand).strip().lower()
-        if lc in m:
-            return m[lc]
-    return None
-
-def _as_ts_flexible(s):
-    if s is None or (isinstance(s, float) and math.isnan(s)):
-        return pd.NaT
-    txt = str(s).strip()
-    if not txt:
-        return pd.NaT
-    ts = pd.to_datetime(txt, errors="coerce", infer_datetime_format=True)
-    if pd.isna(ts):
-        ts = pd.to_datetime(txt.replace("/", "-"), errors="coerce", dayfirst=True)
-    return ts
-
-def _fmt_currency(x) -> str:
-    if x is None or x == "" or (isinstance(x, float) and math.isnan(x)):
-        return ""
-    try:
-        s = str(x).replace("$", "").replace(",", "").strip()
-        val = float(s)
-        return "${:,.2f}".format(val)
-    except Exception:
-        return str(x)
-
-def _parse_currency_to_float(x) -> float:
-    if x is None or x == "" or (isinstance(x, float) and math.isnan(x)):
-        return 0.0
-    try:
-        s = str(x).replace("$", "").replace(",", "").strip()
-        return float(s)
-    except Exception:
-        return 0.0
-
-def _join_addr(city, state, zipc) -> str:
-    city = str(city or "").strip()
-    state = str(state or "").strip()
-    zipc = str(zipc or "").strip()
-    if city and state and zipc:
-        return f"{city}, {state} {zipc}"
-    if city and state:
-        return f"{city}, {state}"
-    if city:
-        return city
-    return ""
-
-def _join_street_with_unit(street, unit) -> str:
-    street = str(street or "").strip()
-    unit = str(unit or "").strip()
-    if unit:
-        return f"{street}, {unit}"
-    return street
 
 def _safe_int(x, default=0):
     try:
@@ -87,356 +15,344 @@ def _safe_int(x, default=0):
     except Exception:
         return default
 
+def _safe_float(x, default=0.0):
+    try:
+        if isinstance(x, str):
+            x = x.replace("$", "").replace(",", "").strip()
+        return float(x)
+    except Exception:
+        return default
+
+def _fmt_currency(x) -> str:
+    try:
+        val = _safe_float(x)
+        return f"${val:,.2f}" if val > 0 else ""
+    except:
+        return ""
+
 def _escape(s: str) -> str:
     if s is None:
         return ""
-    return (
-        str(s)
-        .replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-    )
+    return str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
-# ---------- series builders ----------
-def _join_street_series(a1, a2) -> pd.Series:
-    a1s = pd.Series(a1, dtype="object") if not isinstance(a1, pd.Series) else a1.astype("object")
-    a2s = pd.Series(a2, dtype="object") if not isinstance(a2, pd.Series) else a2.astype("object")
-    rows = []
-    for s1, s2 in zip(a1s, a2s):
-        rows.append(_join_street_with_unit(s1, s2))
-    return pd.Series(rows, dtype="object")
+def _get_column_flexible(df, *names):
+    """Find column by trying multiple name variations"""
+    cols = df.columns.str.lower().str.strip()
+    for name in names:
+        name_lower = str(name).lower().strip()
+        # Exact match first
+        matches = df.columns[cols == name_lower]
+        if len(matches) > 0:
+            return matches[0]
+        # Partial match
+        matches = df.columns[cols.str.contains(name_lower, na=False)]
+        if len(matches) > 0:
+            return matches[0]
+    return None
 
-def _join_cityline_series(city, state, zipc) -> pd.Series:
-    cs = pd.Series(city, dtype="object") if not isinstance(city, pd.Series) else city.astype("object")
-    ss = pd.Series(state, dtype="object") if not isinstance(state, pd.Series) else state.astype("object")
-    zs = pd.Series(zipc, dtype="object") if not isinstance(zipc, pd.Series) else zipc.astype("object")
-    rows = []
-    for c, s, z in zip(cs, ss, zs):
-        rows.append(_join_addr(c, s, z))
-    return pd.Series(rows, dtype="object")
-
-# ---------- public: finalize ----------
 def finalize_summary_for_export_v17(summary: pd.DataFrame) -> pd.DataFrame:
-    df_raw = summary.copy()
+    """Convert raw pipeline output to standardized format for dashboard"""
+    
+    if summary.empty:
+        # Return empty but valid structure
+        return pd.DataFrame({
+            "Mail Dates": [],
+            "CRM Date": [],
+            "Amount": [],
+            "Mail Address": [],
+            "Mail City/State/Zip": [],
+            "CRM Address": [],
+            "CRM City/State/Zip": [],
+            "Confidence": [],
+            "Notes": []
+        })
+    
+    df = summary.copy()
+    
+    # Helper function to safely get series
+    def get_series(df, *col_names, default=""):
+        col = _get_column_flexible(df, *col_names)
+        if col:
+            return df[col].fillna(default).astype(str)
+        return pd.Series([default] * len(df), index=df.index)
+    
+    # Extract all the fields we need
+    mail_dates = get_series(df, "mail_dates_in_window", "mail_dates", "mail_history")
+    crm_dates = get_series(df, "crm_job_date", "crm_date", "job_date")
+    amounts = get_series(df, "crm_amount", "amount", "job_value", "revenue")
+    
+    # Addresses
+    mail_addrs = get_series(df, "matched_mail_full_address", "mail_address", "address1")
+    crm_addr1 = get_series(df, "crm_address1_original", "crm_address1", "crm_street")
+    crm_addr2 = get_series(df, "crm_address2_original", "crm_address2", "crm_unit")
+    
+    # Geography
+    crm_city = get_series(df, "crm_city", "city")
+    crm_state = get_series(df, "crm_state", "state")
+    crm_zip = get_series(df, "crm_zip", "zip", "zipcode")
+    
+    # Build CRM address
+    crm_full_addr = crm_addr1.copy()
+    has_unit = crm_addr2.str.strip() != ""
+    crm_full_addr[has_unit] = crm_addr1[has_unit] + ", " + crm_addr2[has_unit]
+    
+    # Build CRM geography
+    crm_geography = crm_city + ", " + crm_state + " " + crm_zip
+    crm_geography = crm_geography.str.replace(", ,", ",").str.replace("  ", " ").str.strip(" ,")
+    
+    # Confidence and notes
+    confidence = get_series(df, "confidence_percent", "confidence", "score").apply(lambda x: _safe_int(x, 0))
+    notes = get_series(df, "match_notes", "notes")
+    
+    # Build the final dataframe
+    result = pd.DataFrame({
+        "Mail Dates": mail_dates,
+        "CRM Date": crm_dates, 
+        "Amount": amounts.apply(_fmt_currency),
+        "Mail Address": mail_addrs,
+        "Mail City/State/Zip": "",  # Usually not available in pipeline output
+        "CRM Address": crm_full_addr,
+        "CRM City/State/Zip": crm_geography,
+        "Confidence": confidence,
+        "Notes": notes
+    }, index=df.index)
+    
+    # Store raw amounts for KPI calculations
+    raw_amounts = amounts.apply(_safe_float)
+    result.__aux_amounts = raw_amounts
+    result.__aux_crm_city = crm_city
+    result.__aux_crm_state = crm_state  
+    result.__aux_crm_zip = crm_zip
+    
+    # Parse dates for monthly chart
+    def parse_date(date_str):
+        try:
+            if not date_str or str(date_str).strip() == "":
+                return pd.NaT
+            # Handle dd-mm-yy format from your matcher
+            date_str = str(date_str).strip()
+            if re.match(r'\d{2}-\d{2}-\d{2}', date_str):
+                return pd.to_datetime(date_str, format='%d-%m-%y', errors='coerce')
+            return pd.to_datetime(date_str, errors='coerce')
+        except:
+            return pd.NaT
+    
+    result.__aux_dates = crm_dates.apply(parse_date)
+    
+    return result
 
-    # Confidence
-    conf_col = _get_col_ci(df_raw, "confidence_percent", "confidence", "match_confidence", "score")
-    conf_vals = (
-        df_raw[conf_col].map(lambda x: _safe_int(x, 0)).fillna(0).astype(int).clip(0, 100)
-        if conf_col else pd.Series([0]*len(df_raw))
-    )
-
-    # CRM Date
-    crm_date_col = _get_col_ci(df_raw, "crm_job_date", "crm_date", "job_date", "crm date", "crm-date", "date")
-    crm_date_raw = df_raw[crm_date_col] if crm_date_col else pd.Series([""]*len(df_raw))
-    crm_ts = crm_date_raw.map(_as_ts_flexible)
-
-    # Amount / revenue
-    amt_col = None
-    for cand in ["amount", "crm_amount", "job_value", "value", "revenue", "Amount", "Job Value"]:
-        c = _get_col_ci(df_raw, cand)
-        if c:
-            amt_col = c
-            break
-    if amt_col:
-        amt_disp = df_raw[amt_col].map(_fmt_currency)
-        amt_float = df_raw[amt_col].map(_parse_currency_to_float)
-    else:
-        amt_disp = pd.Series([""]*len(df_raw))
-        amt_float = pd.Series([0.0]*len(df_raw))
-
-    # Mail Dates (string list)
-    mail_dates_col = None
-    for cand in ["mail_dates_in_window", "mail_dates", "mailing_dates", "mail history", "mail_history"]:
-        c = _get_col_ci(df_raw, cand)
-        if c:
-            mail_dates_col = c
-            break
-    mail_dates_series = df_raw[mail_dates_col] if mail_dates_col else pd.Series([""]*len(df_raw))
-
-    # Mail side (prefer matched_mail_full_address if present)
-    full_mail_col = _get_col_ci(df_raw, "matched_mail_full_address")
-    if full_mail_col:
-        mail_street_series = df_raw[full_mail_col].fillna("")
-        mail_city_series = df_raw.get(_get_col_ci(df_raw, "city"), "")
-        mail_state_series = df_raw.get(_get_col_ci(df_raw, "state"), "")
-        mail_zip_series = df_raw.get(_get_col_ci(df_raw, "zip","postal_code","zipcode","zip_code"), "")
-        mail_cityline = _join_cityline_series(mail_city_series, mail_state_series, mail_zip_series)
-    else:
-        a1 = df_raw.get(_get_col_ci(df_raw, "address1","mail_address1","mail street","street","addr1","address"), "")
-        a2 = df_raw.get(_get_col_ci(df_raw, "address2","mail_address2","unit","addr2","line2"), "")
-        mail_street_series = _join_street_series(a1, a2)
-        mail_city_series = df_raw.get(_get_col_ci(df_raw, "city","mail_city"), "")
-        mail_state_series = df_raw.get(_get_col_ci(df_raw, "state","mail_state","st"), "")
-        mail_zip_series = df_raw.get(_get_col_ci(df_raw, "zip","postal_code","zipcode","zip_code","mail_zip"), "")
-        mail_cityline = _join_cityline_series(mail_city_series, mail_state_series, mail_zip_series)
-
-    # CRM side
-    crm_a1 = df_raw.get(_get_col_ci(df_raw, "crm_address1","address1","crm street","crm_addr1"), "")
-    crm_a2 = df_raw.get(_get_col_ci(df_raw, "crm_address2","address2","crm unit","crm_addr2","unit"), "")
-    crm_street_series = _join_street_series(crm_a1, crm_a2)
-
-    crm_city = df_raw.get(_get_col_ci(df_raw, "crm_city","city"), "")
-    crm_state = df_raw.get(_get_col_ci(df_raw, "crm_state","state","st"), "")
-    crm_zip = df_raw.get(_get_col_ci(df_raw, "crm_zip","zip","postal_code","zipcode","zip_code"), "")
-    crm_cityline_series = _join_cityline_series(crm_city, crm_state, crm_zip)
-
-    # Notes
-    notes_col = _get_col_ci(df_raw, "match_notes","notes")
-    notes_series = df_raw[notes_col] if notes_col else pd.Series([""]*len(df_raw))
-
-    # Mail count (for KPI avg mailers before engagement)
-    mc_col = _get_col_ci(df_raw, "mail_count_in_window", "mail_count", "mailers_before")
-    mail_count_series = (
-        pd.to_numeric(df_raw[mc_col], errors="coerce").fillna(0).astype(int)
-        if mc_col else pd.Series([0]*len(df_raw))
-    )
-
-    # Build normalized table for rendering
-    out = pd.DataFrame({
-        "Mail Dates": mail_dates_series,
-        "CRM Date": crm_date_raw.fillna(""),
-        "Amount": amt_disp.fillna(""),
-        "Mail Address": mail_street_series.fillna(""),
-        "Mail City/State/Zip": mail_cityline.fillna(""),
-        "CRM Address": crm_street_series.fillna(""),
-        "CRM City/State/Zip": crm_cityline_series.fillna(""),
-        "Confidence": conf_vals.astype(int),
-        "Notes": notes_series.fillna(""),
-    })
-
-    # Aux for KPIs / charts
-    out.__dict__["__aux_crm_ts"] = crm_ts
-    out.__dict__["__aux_amount_float"] = amt_float
-    out.__dict__["__aux_crm_city"] = crm_city
-    out.__dict__["__aux_crm_state"] = crm_state
-    out.__dict__["__aux_crm_zip"] = crm_zip
-    out.__dict__["__aux_mail_count"] = mail_count_series
-
-    return out
-
-# ---------- public: renderer ----------
 def render_full_dashboard_v17(summary_df: pd.DataFrame, mail_total_count: int) -> str:
-    df = summary_df.copy()
-
-    # KPIs
+    """Render the complete dashboard HTML"""
+    
+    if summary_df.empty:
+        return "<div style='padding: 40px; text-align: center;'>No matches found in your data.</div>"
+    
+    # Basic stats
     total_mail = int(mail_total_count or 0)
-    total_matches = int(len(df))
-    total_revenue = float(df.__dict__.get("__aux_amount_float", pd.Series([0.0]*len(df))).sum())
-    mail_counts = df.__dict__.get("__aux_mail_count", pd.Series([0]*len(df)))
-    avg_mailers_before = float(mail_counts.mean()) if len(mail_counts) else 0.0
-    mailers_per_acq = (total_mail / total_matches) if total_matches else 0.0
-
-    # Top cities / zips (CRM side) — top 5
-    crm_city = df.__dict__.get("__aux_crm_city", pd.Series([], dtype="object")).fillna("")
-    crm_state = df.__dict__.get("__aux_crm_state", pd.Series([], dtype="object")).fillna("")
-    crm_zip = df.__dict__.get("__aux_crm_zip", pd.Series([], dtype="object")).fillna("")
-
-    cityline = (crm_city.astype(str).str.strip() + ", " + crm_state.astype(str).str.strip()).str.strip(", ")
-    top_cities = cityline[cityline != ""].value_counts().head(5)
-
-    top_zips = crm_zip.astype(str).str.strip()
-    top_zips = top_zips[(top_zips != "") & (top_zips != "nan") & (top_zips != "None")].value_counts().head(5)
-
-    # Monthly counts (by CRM date)
-    ts = df.__dict__.get("__aux_crm_ts", pd.Series([], dtype="datetime64[ns]"))
-    month_counts = (
-        pd.Series(ts)
-        .dropna()
-        .dt.to_period("M")
-        .astype(str)
-        .value_counts()
-        .sort_index()
-    )
-
-    # Sort table by most recent CRM date
-    order_ts = pd.Series(ts).fillna(pd.Timestamp(0))
-    df_sorted = df.loc[order_ts.sort_values(ascending=False).index]
-
-    def conf_class(v: int) -> str:
-        if v >= 94: return "conf-high"
-        if v >= 88: return "conf-mid"
-        return "conf-low"
-
-    rows_html = []
-    for _, r in df_sorted.iterrows():
-        rows_html.append(f"""
-          <tr>
-            <td class="mono">{_escape(r.get("Mail Dates"))}</td>
-            <td class="mono">{_escape(r.get("CRM Date"))}</td>
-            <td class="mono">{_escape(r.get("Amount"))}</td>
-            <td>{_escape(r.get("Mail Address"))}</td>
-            <td>{_escape(r.get("Mail City/State/Zip"))}</td>
-            <td>{_escape(r.get("CRM Address"))}</td>
-            <td>{_escape(r.get("CRM City/State/Zip"))}</td>
-            <td class="conf {conf_class(_safe_int(r.get("Confidence"), 0))}">{_safe_int(r.get("Confidence"), 0)}%</td>
-            <td>{_escape(r.get("Notes"))}</td>
-          </tr>
+    total_matches = len(summary_df)
+    
+    # Revenue calculation
+    try:
+        amounts = getattr(summary_df, '__aux_amounts', pd.Series([0.0] * len(summary_df)))
+        total_revenue = float(amounts.sum())
+    except:
+        total_revenue = 0.0
+    
+    # Calculate KPIs safely
+    avg_mailers = 0.0  # We don't have this data in current pipeline
+    if total_matches > 0:
+        mailers_per_acq = total_mail / total_matches
+    else:
+        mailers_per_acq = 0.0
+    
+    # Top cities and zips
+    try:
+        crm_cities = getattr(summary_df, '__aux_crm_city', pd.Series([""]))
+        crm_states = getattr(summary_df, '__aux_crm_state', pd.Series([""]))  
+        crm_zips = getattr(summary_df, '__aux_crm_zip', pd.Series([""]))
+        
+        # Create city, state combinations
+        city_state = (crm_cities + ", " + crm_states).str.strip(", ")
+        top_cities = city_state[city_state != ""].value_counts().head(5)
+        top_zips = crm_zips[crm_zips.str.strip() != ""].value_counts().head(5)
+    except:
+        top_cities = pd.Series(dtype=object)
+        top_zips = pd.Series(dtype=object)
+    
+    # Monthly data
+    try:
+        dates = getattr(summary_df, '__aux_dates', pd.Series([]))
+        month_counts = dates.dropna().dt.to_period('M').value_counts().sort_index()
+    except:
+        month_counts = pd.Series(dtype=object)
+    
+    # Confidence color coding
+    def conf_class(conf_val):
+        try:
+            conf = int(conf_val)
+            if conf >= 94:
+                return "conf-high"
+            elif conf >= 88:
+                return "conf-mid"
+            else:
+                return "conf-low"
+        except:
+            return "conf-low"
+    
+    # Build table rows
+    rows = []
+    for _, row in summary_df.iterrows():
+        conf_val = row.get("Confidence", 0)
+        rows.append(f"""
+        <tr>
+            <td class="mono">{_escape(row.get("Mail Dates", ""))}</td>
+            <td class="mono">{_escape(row.get("CRM Date", ""))}</td> 
+            <td class="mono">{_escape(row.get("Amount", ""))}</td>
+            <td>{_escape(row.get("Mail Address", ""))}</td>
+            <td>{_escape(row.get("Mail City/State/Zip", ""))}</td>
+            <td>{_escape(row.get("CRM Address", ""))}</td>
+            <td>{_escape(row.get("CRM City/State/Zip", ""))}</td>
+            <td class="conf {conf_class(conf_val)}">{conf_val}%</td>
+            <td>{_escape(row.get("Notes", ""))}</td>
+        </tr>
         """)
-
-    css = f"""
-    <style>
-      :root {{
-        --brand: {BRAND};
-        --accent: {ACCENT};
-        --on-brand: #ffffff;
-        --bg: #ffffff;
-        --text: #0f172a;
-        --muted: #64748b;
-        --card: #ffffff;
-        --border: #e5e7eb;
-      }}
-      * {{ box-sizing: border-box; }}
-      body {{ margin:0; padding:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; background: var(--bg); color: var(--text); }}
-      .container {{ max-width: 1200px; margin: 0 auto; padding: 24px; }}
-
-      .grid-kpi {{ display:grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin: 16px 0 8px; }}
-      .card {{ background: var(--card); border: 1px solid var(--border); border-radius: 16px; padding: 16px; box-shadow: 0 2px 10px rgba(0,0,0,0.04); }}
-      .kpi .k {{ color: var(--muted); font-size: 13px; }}
-      .kpi .v {{ font-size: 30px; font-weight: 900; }}
-      .kpi {{ border-top: 4px solid var(--brand); }}
-
-      .grid-top {{ display:grid; grid-template-columns: 1fr 1fr; gap: 16px; margin: 8px 0 16px; }}
-      .scroll {{ max-height: 200px; overflow: auto; border:1px solid var(--border); border-radius: 12px; padding: 8px; }}
-      .li {{ display:flex; justify-content: space-between; padding: 8px 6px; border-bottom: 1px dashed #eef2f7; }}
-      .li:last-child {{ border-bottom: 0; }}
-      .name {{ font-weight: 700; }}
-      .cnt {{ color: var(--muted); }}
-
-      .chart {{ margin: 8px 0 24px; padding: 16px; }}
-      .chart .bar {{ display:flex; align-items:center; gap: 8px; margin: 6px 0; }}
-      .chart .bar .label {{ width: 110px; text-align: right; font-size: 12px; color: var(--muted); }}
-      .chart .bar .fill {{ height: 14px; background: color-mix(in oklab, var(--brand) 22%, white); border:1px solid color-mix(in oklab, var(--brand) 50%, white); border-radius: 8px; }}
-      .chart .bar .val {{ font-size: 12px; color: var(--muted); }}
-
-      table {{ width: 100%; border-collapse: collapse; background: #fff; border-radius: 12px; overflow: hidden; }}
-      thead th {{ background: #f8fafc; text-align:left; padding: 12px 14px; border-bottom: 1px solid #f1f5f9; font-size: 13px; }}
-      tbody td {{ padding: 12px 14px; border-bottom: 1px solid #f3f4f6; font-size: 14px; }}
-      tbody tr:hover {{ background:#fafafa; }}
-      .mono {{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }}
-      .conf {{ font-weight: 800; }}
-      .conf-high {{ color: #065f46; }}  /* green */
-      .conf-mid  {{ color: #92400e; }}  /* amber */
-      .conf-low  {{ color: #991b1b; }}  /* red */
-
-      @media (max-width: 900px) {{
-        .grid-kpi {{ grid-template-columns: 1fr 1fr; }}
-        .grid-top {{ grid-template-columns: 1fr; }}
-      }}
-    </style>
-    """
-
-    # KPI block
-    kpis_html = f"""
-      <div class="grid-kpi">
-        <div class="card kpi">
-          <div class="k">Total mail records</div>
-          <div class="v">{total_mail:,}</div>
-        </div>
-        <div class="card kpi">
-          <div class="k">Matches</div>
-          <div class="v">{total_matches:,}</div>
-        </div>
-        <div class="card kpi">
-          <div class="k">Total revenue generated</div>
-          <div class="v">${total_revenue:,.2f}</div>
-        </div>
-        <div class="card kpi">
-          <div class="k">Avg mailers before engagement</div>
-          <div class="v">{avg_mailers_before:.2f}</div>
-        </div>
-      </div>
-      <div class="card kpi" style="margin-top:-4px;">
-        <div class="k">Mailers per acquisition</div>
-        <div class="v">{(total_mail/total_matches):.2f if total_matches else 0.00}</div>
-      </div>
-    """
-
-    # Top lists
-    def li_list(series_counts) -> str:
-        if series_counts is None or len(series_counts) == 0:
-            return "<div class='empty'>No data</div>"
+    
+    # Helper functions for lists and charts
+    def render_top_list(data_series):
+        if len(data_series) == 0:
+            return "<div style='padding: 20px; text-align: center; color: #64748b;'>No data</div>"
+        
         items = []
-        for label, cnt in series_counts.items():
-            items.append(f'<div class="li"><span class="name">{_escape(str(label))}</span><span class="cnt">{int(cnt)}</span></div>')
-        return "\n".join(items)
-
-    cities_html = li_list(top_cities)
-    zips_html = li_list(top_zips)
-
-    top_section = f"""
-      <div class="grid-top">
-        <div class="card">
-          <div class="k" style="margin-bottom:8px;">Top Cities (matches)</div>
-          <div class="scroll">{cities_html}</div>
-        </div>
-        <div class="card">
-          <div class="k" style="margin-bottom:8px;">Top ZIP Codes (matches)</div>
-          <div class="scroll">{zips_html}</div>
-        </div>
-      </div>
-    """
-
-    # Horizontal chart (months on Y label, bars across)
-    chart_html = _horizontal_bar_chart(month_counts)
-    chart_section = f"""
-      <div class="card chart">
-        <div class="k" style="margin-bottom:8px;">Matched Jobs by Month</div>
-        {chart_html}
-      </div>
-    """
-
-    # Summary table
-    table_html = f"""
-      <div class="card">
-        <div class="k" style="margin-bottom:8px;">Sample of Matches</div>
-        <div class="k" style="color: var(--muted); margin-bottom:12px;">Sorted by most recent CRM date (falls back to mail date).</div>
-        <div style="overflow-x:auto;">
-          <table>
-            <thead>
-              <tr>
-                <th class="mono">Mail Dates</th>
-                <th class="mono">CRM Date</th>
-                <th class="mono">Amount</th>
-                <th>Mail Address</th>
-                <th>Mail City/State/Zip</th>
-                <th>CRM Address</th>
-                <th>CRM City/State/Zip</th>
-                <th>Confidence</th>
-                <th>Notes</th>
-              </tr>
-            </thead>
-            <tbody>
-              {''.join(rows_html)}
-            </tbody>
-          </table>
-        </div>
-      </div>
-    """
-
+        for label, count in data_series.items():
+            items.append(f"""
+            <div style="display: flex; justify-content: space-between; padding: 8px; border-bottom: 1px dashed #eee;">
+                <span style="font-weight: 600;">{_escape(str(label))}</span>
+                <span style="color: #64748b;">{int(count)}</span>
+            </div>
+            """)
+        return "".join(items)
+    
+    def render_chart(month_data):
+        if len(month_data) == 0:
+            return "<div style='padding: 20px; text-align: center; color: #64748b;'>No monthly data</div>"
+        
+        max_val = max(month_data.values) if len(month_data) > 0 else 1
+        bars = []
+        for month, count in month_data.items():
+            width = int((count / max_val) * 100) if max_val > 0 else 0
+            bars.append(f"""
+            <div style="display: flex; align-items: center; gap: 8px; margin: 6px 0;">
+                <div style="width: 80px; text-align: right; font-size: 12px; color: #64748b;">{month}</div>
+                <div style="height: 14px; background: #e3f2fd; border: 1px solid #bbdefb; border-radius: 8px; width: {width}%;"></div>
+                <div style="font-size: 12px; color: #64748b;">{int(count)}</div>
+            </div>
+            """)
+        return "".join(bars)
+    
+    # Generate the complete HTML
     html = f"""
-    {css}
+    <style>
+        :root {{
+            --brand: {BRAND};
+            --accent: {ACCENT};
+            --bg: #ffffff;
+            --text: #0f172a;
+            --muted: #64748b;
+            --card: #ffffff;
+            --border: #e5e7eb;
+        }}
+        * {{ box-sizing: border-box; }}
+        body {{ margin:0; padding:0; font-family: system-ui, -apple-system, sans-serif; background: var(--bg); color: var(--text); }}
+        .container {{ max-width: 1200px; margin: 0 auto; padding: 24px; }}
+        .grid-kpi {{ display:grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin: 16px 0; }}
+        .card {{ background: var(--card); border: 1px solid var(--border); border-radius: 16px; padding: 16px; box-shadow: 0 2px 10px rgba(0,0,0,0.04); }}
+        .kpi {{ border-top: 4px solid var(--brand); }}
+        .kpi .k {{ color: var(--muted); font-size: 13px; }}
+        .kpi .v {{ font-size: 30px; font-weight: 900; }}
+        .grid-top {{ display:grid; grid-template-columns: 1fr 1fr; gap: 16px; margin: 16px 0; }}
+        table {{ width: 100%; border-collapse: collapse; background: #fff; border-radius: 12px; overflow: hidden; }}
+        thead th {{ background: #f8fafc; text-align:left; padding: 12px 14px; border-bottom: 1px solid #f1f5f9; font-size: 13px; }}
+        tbody td {{ padding: 12px 14px; border-bottom: 1px solid #f3f4f6; font-size: 14px; }}
+        tbody tr:hover {{ background:#fafafa; }}
+        .mono {{ font-family: ui-monospace, monospace; }}
+        .conf {{ font-weight: 800; }}
+        .conf-high {{ color: #065f46; }}
+        .conf-mid {{ color: #92400e; }}
+        .conf-low {{ color: #991b1b; }}
+        @media (max-width: 900px) {{
+            .grid-kpi {{ grid-template-columns: 1fr 1fr; }}
+            .grid-top {{ grid-template-columns: 1fr; }}
+        }}
+    </style>
+    
     <div class="container">
-      {kpis_html}
-      {top_section}
-      {chart_section}
-      {table_html}
+        <!-- KPIs -->
+        <div class="grid-kpi">
+            <div class="card kpi">
+                <div class="k">Total mail records</div>
+                <div class="v">{total_mail:,}</div>
+            </div>
+            <div class="card kpi">
+                <div class="k">Matches</div>
+                <div class="v">{total_matches:,}</div>
+            </div>
+            <div class="card kpi">
+                <div class="k">Total revenue generated</div>
+                <div class="v">${total_revenue:,.2f}</div>
+            </div>
+            <div class="card kpi">
+                <div class="k">Avg mailers before engagement</div>
+                <div class="v">{avg_mailers:.2f}</div>
+            </div>
+        </div>
+        <div class="card kpi">
+            <div class="k">Mailers per acquisition</div>
+            <div class="v">{mailers_per_acq:.2f}</div>
+        </div>
+        
+        <!-- Top Lists -->
+        <div class="grid-top">
+            <div class="card">
+                <div class="k" style="margin-bottom:8px;">Top Cities (matches)</div>
+                {render_top_list(top_cities)}
+            </div>
+            <div class="card">
+                <div class="k" style="margin-bottom:8px;">Top ZIP Codes (matches)</div>
+                {render_top_list(top_zips)}
+            </div>
+        </div>
+        
+        <!-- Chart -->
+        <div class="card">
+            <div class="k" style="margin-bottom:8px;">Matched Jobs by Month</div>
+            {render_chart(month_counts)}
+        </div>
+        
+        <!-- Table -->
+        <div class="card">
+            <div class="k" style="margin-bottom:8px;">Sample of Matches</div>
+            <div style="overflow-x:auto;">
+                <table>
+                    <thead>
+                        <tr>
+                            <th class="mono">Mail Dates</th>
+                            <th class="mono">CRM Date</th>
+                            <th class="mono">Amount</th>
+                            <th>Mail Address</th>
+                            <th>Mail City/State/Zip</th>
+                            <th>CRM Address</th>
+                            <th>CRM City/State/Zip</th>
+                            <th>Confidence</th>
+                            <th>Notes</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {"".join(rows)}
+                    </tbody>
+                </table>
+            </div>
+        </div>
     </div>
     """
+    
     return html
-
-def _horizontal_bar_chart(month_counts: pd.Series) -> str:
-    if month_counts is None or len(month_counts) == 0:
-        return "<div class='empty'>No monthly data</div>"
-    max_v = max(int(v) for v in month_counts.values) or 1
-    rows = []
-    for label, val in month_counts.items():
-        pct = int((int(val) / max_v) * 100)
-        rows.append(f"""
-          <div class="bar">
-            <div class="label">{_escape(label)}</div>
-            <div class="fill" style="width:{pct}%"></div>
-            <div class="val">{int(val)}</div>
-          </div>
-        """)
-    return "\n".join(rows)
