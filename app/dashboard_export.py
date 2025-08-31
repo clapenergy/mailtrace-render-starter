@@ -237,17 +237,42 @@ def render_full_dashboard_v17(summary_df: pd.DataFrame, mail_total_count: int) -
             return "<div style='padding: 20px; text-align: center; color: #64748b;'>No monthly data</div>"
         
         max_val = max(month_data.values) if len(month_data) > 0 else 1
-        bars = []
+        
+        # Create horizontal chart with months on x-axis
+        chart_html = """
+        <div style="display: flex; flex-direction: column; gap: 8px;">
+            <div style="display: flex; align-items: end; gap: 4px; height: 200px; padding: 10px; border-bottom: 2px solid #e5e7eb;">
+        """
+        
+        # Create bars for each month
         for month, count in month_data.items():
-            width = int((count / max_val) * 100) if max_val > 0 else 0
-            bars.append(f"""
-            <div style="display: flex; align-items: center; gap: 8px; margin: 6px 0;">
-                <div style="width: 80px; text-align: right; font-size: 12px; color: #64748b;">{month}</div>
-                <div style="height: 14px; background: #e3f2fd; border: 1px solid #bbdefb; border-radius: 8px; width: {width}%;"></div>
-                <div style="font-size: 12px; color: #64748b;">{int(count)}</div>
+            height = int((count / max_val) * 160) if max_val > 0 else 0
+            height = max(height, 8)  # Minimum height for visibility
+            
+            chart_html += f"""
+                <div style="display: flex; flex-direction: column; align-items: center; flex: 1;">
+                    <div style="font-size: 11px; color: #64748b; margin-bottom: 4px;">{int(count)}</div>
+                    <div style="width: 100%; height: {height}px; background: linear-gradient(to top, {BRAND}, {ACCENT}); border-radius: 4px 4px 0 0; margin-bottom: 4px;"></div>
+                </div>
+            """
+        
+        chart_html += """
             </div>
-            """)
-        return "".join(bars)
+            <div style="display: flex; gap: 4px;">
+        """
+        
+        # Add month labels at bottom
+        for month, count in month_data.items():
+            chart_html += f"""
+                <div style="flex: 1; text-align: center; font-size: 11px; color: #64748b; transform: rotate(-45deg); transform-origin: center;">{month}</div>
+            """
+        
+        chart_html += """
+            </div>
+        </div>
+        """
+        
+        return chart_html
     
     # Generate the complete HTML
     html = f"""
