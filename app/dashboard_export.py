@@ -76,45 +76,46 @@ def finalize_summary_for_export_v17(summary: pd.DataFrame) -> pd.DataFrame:
             return df[col].fillna(default).astype(str)
         return pd.Series([default] * len(df), index=df.index)
     
-    # DEBUG: Check what columns we actually have
-    print("AVAILABLE COLUMNS:", list(df.columns))
+    # BRUTE FORCE: Check every single column for mail dates
+    mail_dates = pd.Series([""] * len(df))
     
-    # Extract mail dates with explicit debugging
-    mail_dates_col = None
-    for col_name in ["mail_dates_in_window", "mail_dates", "mail_history", "mail_dates_list"]:
-        if col_name in df.columns:
-            mail_dates_col = col_name
-            print(f"FOUND MAIL DATES COLUMN: {col_name}")
-            break
+    print("DEBUG - ALL COLUMNS:", list(df.columns))
     
-    if mail_dates_col:
-        raw_mail_dates = df[mail_dates_col].fillna("")
-        print(f"SAMPLE MAIL DATES: {raw_mail_dates.head(3).tolist()}")
-    else:
-        print("NO MAIL DATES COLUMN FOUND!")
-        raw_mail_dates = pd.Series([""] * len(df))
-    
-    # Format mail dates for display - clean up the comma-separated list
-    def format_mail_dates(date_string):
-        if not date_string or str(date_string).strip() in ["", "None provided", "none"]:
-            return ""
-        
-        # Split comma-separated dates and clean them up
-        dates = [d.strip() for d in str(date_string).split(",") if d.strip()]
-        # Remove "None provided" entries
-        dates = [d for d in dates if d not in ["None provided", "none", "None"]]
-        
-        if not dates:
-            return ""
-        
-        # If multiple dates, show them in a compact format
-        if len(dates) <= 3:
-            return ", ".join(dates)
-        else:
-            # Show first few dates + count
-            return f"{', '.join(dates[:2])}, +{len(dates)-2} more"
-    
-    mail_dates = raw_mail_dates.apply(format_mail_dates)
+    # Try every column that might contain mail dates
+    for col in df.columns:
+        col_lower = str(col).lower()
+        if any(keyword in col_lower for keyword in ["mail", "date", "sent", "window", "history"]):
+            sample_val = str(df[col].iloc[0]) if len(df) > 0 else ""
+            print(f"CHECKING COLUMN '{col}': Sample = '{sample_val}'")
+            
+            # If this column has comma-separated dates, use it
+            if "," in sample_val or any(char.isdigit() for char in sample_val):
+                print(f"USING COLUMN '{col}' for mail dates")
+                
+                def format_mail_dates(date_string):
+                    if not date_string or str(date_string).strip() in ["", "None provided", "none", "nan"]:
+                        return ""
+                    
+                    date_str = str(date_string).strip()
+                    # If it's already a single date, return it
+                    if re.match(r'\d{2}-\d{2}-\d{2}', date_str) and ',' not in date_str:
+                        return date_str
+                    
+                    # Split comma-separated dates and clean them up
+                    dates = [d.strip() for d in date_str.split(",") if d.strip()]
+                    dates = [d for d in dates if d not in ["None provided", "none", "None", "nan"]]
+                    
+                    if not dates:
+                        return ""
+                    
+                    # Show first few dates
+                    if len(dates) <= 3:
+                        return ", ".join(dates)
+                    else:
+                        return f"{', '.join(dates[:2])}, +{len(dates)-2} more"
+                
+                mail_dates = df[col].apply(format_mail_dates)
+                break
     crm_dates = get_series(df, "crm_job_date", "crm_date", "job_date")
     amounts = get_series(df, "crm_amount", "amount", "job_value", "revenue")
     
