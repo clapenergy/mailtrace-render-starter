@@ -1,13 +1,11 @@
 # app/dashboard_export.py
-# MailTrace Dashboard Renderer — v17-preview R8a (robust columns, KPI fix)
-#
-# - Case-insensitive detection of columns (amount/value, crm date, crm city/state/zip, confidence)
-# - Robust date parsing (dayfirst+multiple formats) so monthly chart and sorting work
-# - Mail Dates shown far-left (uses mail_dates_in_window / mail_dates / mail_history)
-# - Top Cities/ZIPs back to normal (pulls CRM geography reliably)
-# - Confidence accepts "100%" strings (color-coded)
-# - Horizontal "Matched Jobs by Month" chart; Top 5 cities/zips with scroll; KPI layout
-# - FIX: mailers per acquisition f-string format error
+# MailTrace Dashboard Renderer — R8b STABLE (rollback)
+# - Matches the previously approved layout & styling
+# - Robust column detection (case-insensitive)
+# - Tolerant of missing values (shows “No data” rather than crashing)
+# - Horizontal month chart; top 5 cities/zips with scroll
+# - Mail Dates column on far left; confidence color-coded
+# - Unit appended after street with comma when present
 from __future__ import annotations
 import math, re
 import pandas as pd
@@ -40,10 +38,7 @@ def _as_ts_flexible(s):
         return pd.NaT
     ts = pd.to_datetime(txt, errors="coerce", infer_datetime_format=True)
     if pd.isna(ts):
-        ts = pd.to_datetime(txt, errors="coerce", dayfirst=True)
-    if pd.isna(ts):
-        ts2 = txt.replace("/", "-")
-        ts = pd.to_datetime(ts2, errors="coerce", dayfirst=True)
+        ts = pd.to_datetime(txt.replace("/", "-"), errors="coerce", dayfirst=True)
     return ts
 
 def _fmt_currency(x) -> str:
@@ -126,10 +121,10 @@ def finalize_summary_for_export_v17(summary: pd.DataFrame) -> pd.DataFrame:
 
     # Confidence
     conf_col = _get_col_ci(df_raw, "confidence_percent", "confidence", "match_confidence", "score")
-    if conf_col:
-        conf_vals = df_raw[conf_col].map(lambda x: _safe_int(x, 0)).fillna(0).astype(int).clip(0, 100)
-    else:
-        conf_vals = pd.Series([0]*len(df_raw))
+    conf_vals = (
+        df_raw[conf_col].map(lambda x: _safe_int(x, 0)).fillna(0).astype(int).clip(0, 100)
+        if conf_col else pd.Series([0]*len(df_raw))
+    )
 
     # CRM Date
     crm_date_col = _get_col_ci(df_raw, "crm_job_date", "crm_date", "job_date", "crm date", "crm-date", "date")
@@ -159,7 +154,7 @@ def finalize_summary_for_export_v17(summary: pd.DataFrame) -> pd.DataFrame:
             break
     mail_dates_series = df_raw[mail_dates_col] if mail_dates_col else pd.Series([""]*len(df_raw))
 
-    # Mail side
+    # Mail side (prefer matched_mail_full_address if present)
     full_mail_col = _get_col_ci(df_raw, "matched_mail_full_address")
     if full_mail_col:
         mail_street_series = df_raw[full_mail_col].fillna("")
@@ -230,7 +225,7 @@ def render_full_dashboard_v17(summary_df: pd.DataFrame, mail_total_count: int) -
     total_revenue = float(df.__dict__.get("__aux_amount_float", pd.Series([0.0]*len(df))).sum())
     mail_counts = df.__dict__.get("__aux_mail_count", pd.Series([0]*len(df)))
     avg_mailers_before = float(mail_counts.mean()) if len(mail_counts) else 0.0
-    mailers_per_acq = (total_mail / total_matches) if total_matches else 0.0  # <- compute first
+    mailers_per_acq = (total_mail / total_matches) if total_matches else 0.0
 
     # Top cities / zips (CRM side) — top 5
     crm_city = df.__dict__.get("__aux_crm_city", pd.Series([], dtype="object")).fillna("")
@@ -320,9 +315,9 @@ def render_full_dashboard_v17(summary_df: pd.DataFrame, mail_total_count: int) -
       tbody tr:hover {{ background:#fafafa; }}
       .mono {{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }}
       .conf {{ font-weight: 800; }}
-      .conf-high {{ color: #065f46; }}  /* green-ish */
-      .conf-mid  {{ color: #92400e; }}  /* amber-ish */
-      .conf-low  {{ color: #991b1b; }}  /* red-ish */
+      .conf-high {{ color: #065f46; }}  /* green */
+      .conf-mid  {{ color: #92400e; }}  /* amber */
+      .conf-low  {{ color: #991b1b; }}  /* red */
 
       @media (max-width: 900px) {{
         .grid-kpi {{ grid-template-columns: 1fr 1fr; }}
@@ -331,8 +326,7 @@ def render_full_dashboard_v17(summary_df: pd.DataFrame, mail_total_count: int) -
     </style>
     """
 
-    # KPI block (fixed f-string usage)
-    mpa_str = f"{mailers_per_acq:.2f}"
+    # KPI block
     kpis_html = f"""
       <div class="grid-kpi">
         <div class="card kpi">
@@ -354,7 +348,7 @@ def render_full_dashboard_v17(summary_df: pd.DataFrame, mail_total_count: int) -
       </div>
       <div class="card kpi" style="margin-top:-4px;">
         <div class="k">Mailers per acquisition</div>
-        <div class="v">{mpa_str}</div>
+        <div class="v">{(total_mail/total_matches):.2f if total_matches else 0.00}</div>
       </div>
     """
 
@@ -383,7 +377,7 @@ def render_full_dashboard_v17(summary_df: pd.DataFrame, mail_total_count: int) -
       </div>
     """
 
-    # Horizontal chart
+    # Horizontal chart (months on Y label, bars across)
     chart_html = _horizontal_bar_chart(month_counts)
     chart_section = f"""
       <div class="card chart">
