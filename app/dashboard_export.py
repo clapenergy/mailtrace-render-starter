@@ -1,395 +1,517 @@
 # app/dashboard_export.py
-# Dashboard-v4.3 — adds a leftmost "Mail Dates" column (from mail_dates_in_window).
-# Keeps prior features: address rescue, KPIs, Top 5 lists with scroll, horizontal month chart,
-# and color-coded confidence.
+# MailTrace Dashboard Renderer — v17-preview R7
+# - Adds "Mail Dates" as the FAR-LEFT column in the summary table
+# - Horizontal "Matched Jobs by Month" chart
+# - Top Cities / Top ZIPs (top 5, scrollable)
+# - KPI cards: Total Mail, Matches, Total Revenue, Avg Mailers Before Engagement, Mailers per Acquisition
+# - Confidence color-coding
+#
+# Exposed functions:
+#   - finalize_summary_for_export_v17(summary_df) -> DataFrame (cleaned for CSV + render)
+#   - render_full_dashboard_v17(summary_df, mail_total_count: int) -> HTML string
 
 from __future__ import annotations
-import io, base64, html, re
-from typing import Optional, Tuple, List
+import math
 import pandas as pd
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
+from datetime import datetime
+from io import StringIO
 
-def _esc(x) -> str:
-    return "" if x is None else html.escape(str(x))
+BRAND = "#0c2d4e"
+ACCENT = "#759d40"
 
-def _money_to_float(s: str) -> float:
+# -----------------------------
+# Helpers
+# -----------------------------
+def _as_date_any(x) -> pd.Timestamp | None:
+    if x is None or (isinstance(x, float) and math.isnan(x)):  # NaN
+        return None
     try:
-        return float(str(s).replace("$", "").replace(",", "").strip() or 0.0)
+        return pd.to_datetime(x, errors="coerce")
+    except Exception:
+        return None
+
+def _fmt_currency(x) -> str:
+    if x is None or x == "" or (isinstance(x, float) and math.isnan(x)):
+        return ""
+    try:
+        # Strip currency symbols/commas if present
+        s = str(x).replace("$", "").replace(",", "").strip()
+        val = float(s)
+        return "${:,.2f}".format(val)
+    except Exception:
+        return str(x)
+
+def _parse_currency_to_float(x) -> float:
+    if x is None or x == "" or (isinstance(x, float) and math.isnan(x)):
+        return 0.0
+    try:
+        s = str(x).replace("$", "").replace(",", "").strip()
+        return float(s)
     except Exception:
         return 0.0
 
-# ---------------- Address parsing helpers ----------------
+def _coalesce(*vals):
+    for v in vals:
+        if isinstance(v, str) and v.strip():
+            return v
+        if v not in (None, "", float("nan")):
+            return v
+    return ""
 
-_UNIT_PAT = re.compile(
-    r"(?:^|[\s,.-])(?:(apt|apartment|suite|ste|unit|bldg|fl|floor)\s*#?\s*([\w-]+)|#\s*([\w-]+))\s*$",
-    re.IGNORECASE,
-)
-
-_STREET_WORDS = {
-    "street","st","st.","avenue","ave","ave.","av","av.","boulevard","blvd","blvd.","road","rd","rd.",
-    "lane","ln","ln.","drive","dr","dr.","court","ct","ct.","circle","cir","cir.","parkway","pkwy","pkwy.",
-    "place","pl","pl.","terrace","ter","ter.","trail","trl","trl.","highway","hwy","hwy.","way","wy","wy.",
-    "pkway","common","cmn","cmn.","pkwy"
-}
-
-_CITY_ST_ZIP_TAIL = re.compile(
-    r"\s*(?:,?\s*[A-Za-z .'\-]+)?\s*,?\s*[A-Z]{2}\s+\d{5}(?:-\d{4})?\s*$"
-)
-
-def _strip_trailing_city_state_zip(addr1: str) -> str:
-    s = (addr1 or "").strip()
-    if not s:
-        return s
-    if _CITY_ST_ZIP_TAIL.search(s):
-        s = _CITY_ST_ZIP_TAIL.sub("", s).rstrip(" ,.-")
-    return s
-
-def _looks_like_house_number_only(s: str) -> bool:
-    return bool(re.fullmatch(r"\d{1,8}", (s or "").strip()))
-
-def _split_unit_from_line(addr1: str) -> Tuple[str, str]:
-    s = (addr1 or "").strip()
-    if not s:
-        return "", ""
-    m = _UNIT_PAT.search(s)
-    if not m:
-        return s, ""
-    kind = (m.group(1) or "").strip()
-    u1 = (m.group(2) or "").strip()
-    u2 = (m.group(3) or "").strip()
-    unit = f"{kind.title()} {u1}" if kind else f"#{u2}"
-    street = s[: m.start()].rstrip(" ,.-")
-    return street, unit
-
-def _city_has_streety_bits(city: str) -> bool:
-    if not isinstance(city, str): return False
-    t = re.findall(r"[A-Za-z0-9#']+", city.lower())
-    has_num = any(tok.isdigit() for tok in t)
-    has_street_word = any(tok in _STREET_WORDS for tok in t)
-    return has_street_word or has_num
-
-def _extract_street_from_city_loose(city: str, true_city_guess: str) -> Tuple[str, str]:
-    s = (city or "").strip()
-    if not s:
-        return "", ""
-    if true_city_guess and true_city_guess in s and true_city_guess != s:
-        head = s[: s.rfind(true_city_guess)].rstrip(" ,.-")
-        tail = true_city_guess
-        if head and tail:
-            return head, tail
-    toks = re.findall(r"[A-Za-z0-9']+", s)
-    if len(toks) >= 2:
-        last = toks[-1]
-        if last.isalpha() and last[0].isupper() and last.lower() not in _STREET_WORDS:
-            head = " ".join(toks[:-1]).strip()
-            tail = last
-            if head and tail:
-                return head, tail
-        if len(toks) >= 2 and all(x.isalpha() and x[0].isupper() for x in toks[-2:]):
-            head = " ".join(toks[:-2]).strip()
-            tail = " ".join(toks[-2:])
-            if head and tail:
-                return head, tail
-    if "," in s:
-        head, tail = s.rsplit(",", 1)
-        return head.strip(" ,.-"), tail.strip()
-    return "", s
-
-def _format_addr_with_unit(addr1: str, addr2: str, mail_city: str = "", mail_state: str = "", mail_zip: str = "") -> str:
-    a1_raw = (addr1 or "").strip()
-    a2 = (addr2 or "").strip()
-    a1 = _strip_trailing_city_state_zip(a1_raw)
-
-    if _looks_like_house_number_only(a1) and _city_has_streety_bits(mail_city):
-        street_from_city, _ = _extract_street_from_city_loose(mail_city, mail_city)
-        if street_from_city:
-            a1 = (a1 + " " + street_from_city).strip()
-
-    if a2:
-        street, _ = _split_unit_from_line(a1)
-        unit = a2
-    else:
-        street, unit = _split_unit_from_line(a1)
-        if not unit:
-            return street
-    return f"{street}, {unit}".strip(", ").strip()
-
-def _clean_city_for_display(city: str) -> str:
-    s = (city or "").strip()
-    if not s:
-        return s
-    _, city_clean = _extract_street_from_city_loose(s, s)
-    if city_clean and city_clean != s:
-        return city_clean
-    return s
-
-def _format_city_state_zip(city: str, state: str, zipc: str) -> str:
-    city = _clean_city_for_display(city)
-    state = (state or "").strip().upper()
-    zipc = (zipc or "").strip()
+def _join_addr(city, state, zipc) -> str:
+    city = str(city or "").strip()
+    state = str(state or "").strip()
+    zipc = str(zipc or "").strip()
+    if city and state and zipc:
+        return f"{city}, {state} {zipc}"
     if city and state:
-        return f"{city}, {state} {zipc}".strip()
+        return f"{city}, {state}"
     if city:
-        return f"{city} {zipc}".strip()
-    if state:
-        return f"{state} {zipc}".strip()
-    return zipc
+        return city
+    return ""
 
-# ---------------- Public API: finalize ----------------
-def finalize_summary_for_export_v17(df: pd.DataFrame) -> pd.DataFrame:
-    d = df.copy()
+def _join_street_with_unit(street, unit) -> str:
+    street = str(street or "").strip()
+    unit = str(unit or "").strip()
+    if unit:
+        # Use comma separator between street and unit as requested
+        return f"{street}, {unit}"
+    return street
 
-    rename_map = {
-        "crmaddress1": "crm_address1", "crm_address1_original": "crm_address1",
-        "crmaddress2": "crm_address2",
-        "crmcity": "crm_city", "crmstate": "crm_state", "crmzip": "crm_zip",
-        "crmdate": "crm_job_date", "job_date": "crm_job_date",
-        "amount": "crm_amount", "value": "crm_amount",
-        "confidence_percent": "confidence",
-        # allow passthrough of prior-constructed dates list if named slightly differently
-        "mail_dates": "mail_dates_in_window",
-    }
-    for k, v in rename_map.items():
-        if k in d.columns and v not in d.columns:
-            d.rename(columns={k: v}, inplace=True)
+def _month_key(ts: pd.Timestamp | None) -> str:
+    if ts is None or pd.isna(ts):
+        return ""
+    return ts.strftime("%Y-%m")
 
-    # Ensure expected columns exist
-    for col in [
-        "crm_job_date","crm_amount",
-        "address1","address2","city","state","zip",
-        "crm_address1","crm_address2","crm_city","crm_state","crm_zip",
-        "confidence","match_notes","mail_count_in_window","mail_date",
-        "mail_dates_in_window"
-    ]:
-        if col not in d.columns:
-            d[col] = ""
-
+def _safe_int(x, default=0):
     try:
-        d["confidence"] = pd.to_numeric(d["confidence"], errors="coerce").fillna(0).clip(0,100).astype(int)
+        return int(x)
     except Exception:
-        d["confidence"] = 0
+        return default
 
-    if "crm_amount" in d.columns:
-        def _fmt_money(x):
-            v = _money_to_float(x)
-            return f"${v:,.2f}" if v else ""
-        d["crm_amount"] = d["crm_amount"].map(_fmt_money)
+# -----------------------------
+# Public: finalize for CSV + render
+# -----------------------------
+def finalize_summary_for_export_v17(summary: pd.DataFrame) -> pd.DataFrame:
+    """
+    Normalizes columns expected by the renderer & CSV export.
+    Expected potential columns from your pipeline/matcher:
+      - crm_job_date (string date) OR crm_date
+      - amount / crm_amount / value (currency)
+      - matched_mail_full_address OR (address1/address2 + city/state/zip)
+      - mail_dates_in_window (comma-delimited dd-mm-yy, etc.)  <-- used for Mail Dates column
+      - match_notes
+      - confidence_percent (0..100) OR confidence
+      - crm_* address parts, mail_* address parts
+    Returns a NEW DataFrame with normalized columns for the dashboard table.
+    """
+    df = summary.copy()
 
-    def _fix_notes(x):
-        if not isinstance(x, str) or not x:
-            return x
-        return x.replace("NaN", "none").replace("nan", "none")
-    d["match_notes"] = d["match_notes"].map(_fix_notes)
-
-    # Normalize the mail dates list to a compact, safe string
-    def _fmt_mail_dates(s):
-        if s is None: return ""
-        txt = str(s).strip()
-        if not txt: return ""
-        # collapse spaces after commas
-        txt = re.sub(r"\s*,\s*", ", ", txt)
-        return txt
-    d["mail_dates_in_window"] = d["mail_dates_in_window"].map(_fmt_mail_dates)
-
-    return d
-
-# ---------------- Confidence color formatting ----------------
-def _conf_span(v) -> str:
-    """Return a <span> with class for colored confidence."""
-    try:
-        val = int(v)
-    except Exception:
-        return _esc(v)
-    if val >= 94:
-        klass = "conf-high"
-    elif val >= 88:
-        klass = "conf-mid"
+    # Normalize confidence column → integer 0..100
+    if "confidence_percent" in df.columns:
+        conf = df["confidence_percent"]
+    elif "confidence" in df.columns:
+        conf = df["confidence"]
     else:
-        klass = "conf-low"
-    return f'<span class="{klass}">{val}%</span>'
+        conf = 0
+    df["__confidence"] = pd.to_numeric(conf, errors="coerce").fillna(0).astype(int).clip(0, 100)
 
-# ---------------- Public API: render ----------------
-def render_full_dashboard_v17(summary_df: pd.DataFrame,
-                              mail_total_count: Optional[int] = None,
-                              **_ignore) -> str:
-    d = summary_df.copy()
+    # Normalize CRM date
+    date_col = None
+    for cand in ["crm_job_date", "crm_date", "CRM Date", "job_date"]:
+        if cand in df.columns:
+            date_col = cand
+            break
+    # Keep original string for display ordering/fallback parse
+    df["__crm_date_raw"] = df[date_col] if date_col else ""
 
-    # KPIs
-    total_mail = int(mail_total_count) if mail_total_count not in (None, "") else ""
-    total_matches = len(d)
-    total_revenue = d["crm_amount"].map(_money_to_float).sum()
+    # Parse to timestamp for sorting and monthly chart
+    def _to_ts(x):
+        if pd.isna(x) or str(x).strip() == "":
+            return pd.NaT
+        try:
+            return pd.to_datetime(x, errors="coerce")
+        except Exception:
+            return pd.NaT
+    df["__crm_ts"] = df["__crm_date_raw"].apply(_to_ts)
 
-    avg_mailers_prior = None
-    if "mail_count_in_window" in d.columns:
-        s = pd.to_numeric(d["mail_count_in_window"], errors="coerce")
-        if s.notna().any():
-            avg_mailers_prior = float(s.mean())
+    # Amount normalization
+    amt_col = None
+    for cand in ["amount", "crm_amount", "job_value", "value", "revenue"]:
+        if cand in df.columns:
+            amt_col = cand
+            break
+    if amt_col:
+        df["__amount_display"] = df[amt_col].map(_fmt_currency)
+        df["__amount_float"] = df[amt_col].map(_parse_currency_to_float)
+    else:
+        df["__amount_display"] = ""
+        df["__amount_float"] = 0.0
 
-    mailers_per_acq = None
-    if total_mail and total_matches:
-        mailers_per_acq = total_mail / total_matches
+    # Build compact display fields for Mail & CRM address lines
+    # MAIL side
+    mail_street = _coalesce(df.get("matched_mail_full_address", ""))
+    if not isinstance(mail_street, pd.Series):
+        mail_street = pd.Series([""] * len(df))
+    # If matched_mail_full_address not present, try composing from parts
+    if mail_street.eq("").all():
+        mail_street = _join_street_series(
+            df.get("address1",""), df.get("address2","")
+        )
+    mail_cityline = _join_cityline_series(
+        df.get("city",""), df.get("state",""), df.get("zip","")
+    )
 
-    # Top lists
-    safe_city = d.get("crm_city", "").fillna("")
-    safe_state = d.get("crm_state", "").fillna("")
-    safe_zip = d.get("crm_zip", "").fillna("")
+    # CRM side (street and cityline)
+    crm_street_series = _join_street_series(
+        df.get("crm_address1","") if "crm_address1" in df.columns else df.get("address1",""),
+        df.get("crm_address2","") if "crm_address2" in df.columns else df.get("address2",""),
+    )
+    crm_cityline_series = _join_cityline_series(
+        df.get("crm_city","") if "crm_city" in df.columns else df.get("city",""),
+        df.get("crm_state","") if "crm_state" in df.columns else df.get("state",""),
+        df.get("crm_zip","") if "crm_zip" in df.columns else df.get("zip",""),
+    )
 
-    city_counts = (pd.DataFrame({"crm_city": safe_city, "crm_state": safe_state})
-                    .assign(_one=1)
-                    .groupby(["crm_city","crm_state"], dropna=False)["_one"].sum()
-                    .reset_index(name="matches")
-                    .sort_values("matches", ascending=False).head(5))
+    # Mail dates list (string) – this powers the Mail Dates column
+    if "mail_dates_in_window" not in df.columns:
+        # Try a fallback if your pipeline named it differently
+        for alt in ["mail_dates", "mail_history", "mailing_dates"]:
+            if alt in df.columns:
+                df["mail_dates_in_window"] = df[alt]
+                break
+    if "mail_dates_in_window" not in df.columns:
+        df["mail_dates_in_window"] = ""  # last resort
 
-    zip_counts = (pd.DataFrame({"crm_zip": safe_zip})
-                    .assign(_one=1)
-                    .groupby("crm_zip", dropna=False)["_one"].sum()
-                    .reset_index(name="matches")
-                    .sort_values("matches", ascending=False).head(5))
+    # Notes
+    notes_col = "match_notes" if "match_notes" in df.columns else None
+    df["__notes"] = df[notes_col] if notes_col else ""
 
-    # Monthly chart (vertical bars, months on X)
-    mdates = pd.to_datetime(d.get("crm_job_date", ""), errors="coerce")
-    monthly_counts = (pd.DataFrame({"month": mdates})
-                        .dropna()
-                        .assign(month=lambda x: x["month"].dt.to_period("M"))
-                        .groupby("month")
-                        .size().reset_index(name="matches"))
-    monthly_counts["month_str"] = monthly_counts["month"].astype(str)
-    monthly_counts = monthly_counts.sort_values("month")
+    # Build the *render* DataFrame in the exact column order needed by the UI table.
+    out = pd.DataFrame({
+        "Mail Dates": df["mail_dates_in_window"],                              # FAR-LEFT
+        "CRM Date": df["__crm_date_raw"],
+        "Amount": df["__amount_display"],
+        "Mail Address": mail_street,
+        "Mail City/State/Zip": mail_cityline,
+        "CRM Address": crm_street_series,
+        "CRM City/State/Zip": crm_cityline_series,
+        "Confidence": df["__confidence"].astype(int),
+        "Notes": df["__notes"].fillna(""),
+    })
 
-    fig, ax = plt.subplots(figsize=(10, 4))
-    ax.bar(monthly_counts["month_str"], monthly_counts["matches"])
-    ax.set_xlabel("Month")
-    ax.set_ylabel("Matches")
-    ax.set_title("Matched Jobs by Month")
-    for label in ax.get_xticklabels():
-        label.set_rotation(45)
-        label.set_horizontalalignment("right")
-    fig.tight_layout()
-    bio = io.BytesIO()
-    plt.savefig(bio, format="png", dpi=150)
-    plt.close(fig)
-    month_png_b64 = base64.b64encode(bio.getvalue()).decode("ascii")
-    month_img_tag = f'<img alt="Matched jobs by month" src="data:image/png;base64,{month_png_b64}" style="width:100%;max-width:1000px;">'
+    # Keep auxiliary series for KPIs/graph in the same object (so renderer can access)
+    out.__dict__["__aux_crm_ts"] = df["__crm_ts"]
+    out.__dict__["__aux_amount_float"] = df["__amount_float"]
 
-    # CSS (adds conf-high/mid/low classes)
-    css = """
+    # Also keep a tiny projection for Top Cities/ZIPs on the CRM side
+    out.__dict__["__aux_crm_city"] = (df.get("crm_city") if "crm_city" in df.columns else df.get("city"))
+    out.__dict__["__aux_crm_state"] = (df.get("crm_state") if "crm_state" in df.columns else df.get("state"))
+    out.__dict__["__aux_crm_zip"] = (df.get("crm_zip") if "crm_zip" in df.columns else df.get("zip"))
+
+    # For "Avg # mailers before engagement", try to compute from a mail_count column if present
+    # (Your matcher often outputs mail_count_in_window.)
+    if "mail_count_in_window" in df.columns:
+        out.__dict__["__aux_mail_count"] = pd.to_numeric(df["mail_count_in_window"], errors="coerce").fillna(0).astype(int)
+    else:
+        out.__dict__["__aux_mail_count"] = pd.Series([0]*len(out))
+
+    return out
+
+
+def _join_street_series(a1, a2) -> pd.Series:
+    a1s = pd.Series(a1, dtype="object") if not isinstance(a1, pd.Series) else a1.astype("object")
+    a2s = pd.Series(a2, dtype="object") if not isinstance(a2, pd.Series) else a2.astype("object")
+    rows = []
+    for s1, s2 in zip(a1s, a2s):
+        rows.append(_join_street_with_unit(s1, s2))
+    return pd.Series(rows, dtype="object")
+
+def _join_cityline_series(city, state, zipc) -> pd.Series:
+    cs = pd.Series(city, dtype="object") if not isinstance(city, pd.Series) else city.astype("object")
+    ss = pd.Series(state, dtype="object") if not isinstance(state, pd.Series) else state.astype("object")
+    zs = pd.Series(zipc, dtype="object") if not isinstance(zipc, pd.Series) else zipc.astype("object")
+    rows = []
+    for c, s, z in zip(cs, ss, zs):
+        rows.append(_join_addr(c, s, z))
+    return pd.Series(rows, dtype="object")
+
+
+# -----------------------------
+# Public: HTML renderer
+# -----------------------------
+def render_full_dashboard_v17(summary_df: pd.DataFrame, mail_total_count: int) -> str:
+    """
+    Build the full HTML for the dashboard using the normalized summary_df produced
+    by finalize_summary_for_export_v17().
+    """
+    df = summary_df.copy()
+
+    # KPI metrics
+    total_mail = mail_total_count
+    total_matches = len(df)
+    total_revenue = float(df.__dict__.get("__aux_amount_float", pd.Series([0.0]*len(df))).sum())
+
+    # Avg # of mailers before engagement
+    mail_counts = df.__dict__.get("__aux_mail_count", pd.Series([0]*len(df)))
+    avg_mailers_before = float(mail_counts.mean()) if len(mail_counts) else 0.0
+
+    # Mailers per acquisition = total_mail / total_matches (avoid div by zero)
+    mailers_per_acq = (total_mail / total_matches) if total_matches else 0.0
+
+    # Top cities / zips from CRM side, top 5
+    crm_city = df.__dict__.get("__aux_crm_city", pd.Series([], dtype="object"))
+    crm_state = df.__dict__.get("__aux_crm_state", pd.Series([], dtype="object"))
+    crm_zip = df.__dict__.get("__aux_crm_zip", pd.Series([], dtype="object"))
+
+    top_cities = (
+        pd.DataFrame({"city": crm_city, "state": crm_state})
+        .fillna("")
+        .assign(cityline=lambda x: x["city"].astype(str).str.strip() + ", " + x["state"].astype(str).str.strip())
+        .groupby("cityline", dropna=False)
+        .size()
+        .sort_values(ascending=False)
+        .head(5)
+    )
+
+    top_zips = (
+        pd.Series(crm_zip, dtype="object")
+        .astype(str).str.strip()
+        .replace({"nan": "", "None": ""})
+        .groupby(lambda idx: df.index[idx])  # keep alignment
+        .apply(lambda x: x)
+        .reset_index(drop=True)
+        .value_counts()
+        .sort_values(ascending=False)
+        .head(5)
+    )
+
+    # Monthly counts (by CRM date)
+    ts = df.__dict__.get("__aux_crm_ts", pd.Series([], dtype="datetime64[ns]"))
+    month_counts = (
+        pd.Series(ts)
+        .dropna()
+        .dt.to_period("M")
+        .astype(str)
+        .value_counts()
+        .sort_index()
+    )
+
+    # Build HTML table rows (Mail Dates on the far left)
+    def conf_class(v: int) -> str:
+        # simple color buckets
+        if v >= 94:
+            return "conf-high"
+        if v >= 88:
+            return "conf-mid"
+        return "conf-low"
+
+    table_rows = []
+    # Sort rows by most recent CRM date (falls back to Mail Dates first parsed date)
+    # For simplicity, we already have sorted by CRM date outside; but ensure display:
+    order_ts = ts.fillna(pd.Timestamp(0))
+    order = order_ts.sort_values(ascending=False).index
+    df_sorted = df.loc[order]
+
+    for _, r in df_sorted.iterrows():
+        mail_dates = str(r.get("Mail Dates") or "")
+        crm_date = str(r.get("CRM Date") or "")
+        amt = str(r.get("Amount") or "")
+        mail_addr = str(r.get("Mail Address") or "")
+        mail_cityline = str(r.get("Mail City/State/Zip") or "")
+        crm_addr = str(r.get("CRM Address") or "")
+        crm_cityline = str(r.get("CRM City/State/Zip") or "")
+        conf = _safe_int(r.get("Confidence"), 0)
+        notes = str(r.get("Notes") or "")
+        table_rows.append(f"""
+          <tr>
+            <td class="mono">{_escape(mail_dates)}</td>
+            <td class="mono">{_escape(crm_date)}</td>
+            <td class="mono">{_escape(amt)}</td>
+            <td>{_escape(mail_addr)}</td>
+            <td>{_escape(mail_cityline)}</td>
+            <td>{_escape(crm_addr)}</td>
+            <td>{_escape(crm_cityline)}</td>
+            <td class="conf {conf_class(conf)}">{conf}%</td>
+            <td>{_escape(notes)}</td>
+          </tr>
+        """)
+
+    # Render top cities/zips list items
+    def li_list(series_counts) -> str:
+        items = []
+        for label, cnt in series_counts.items():
+            items.append(f'<div class="li"><span class="name">{_escape(str(label))}</span><span class="cnt">{int(cnt)}</span></div>')
+        return "\n".join(items) or "<div class='empty'>No data</div>"
+
+    cities_html = li_list(top_cities)
+    zips_html = li_list(top_zips)
+
+    # Horizontal bar chart HTML for month_counts
+    chart_html = _horizontal_bar_chart(month_counts)
+
+    # CSS + HTML skeleton
+    css = f"""
     <style>
-      :root { --brand:#0c2d4e; --accent:#759d40; --on-brand:#fff; --text:#0f172a; --muted:#64748b; --border:#e5e7eb; }
-      body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 24px; color: var(--text); }
-      .grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(220px,1fr)); gap:16px; }
-      .card { background:#fff; border:1px solid var(--border); border-radius:16px; padding:16px; box-shadow:0 2px 8px rgba(0,0,0,.04); }
-      .k { color: var(--muted); font-size: 13px; }
-      .v { font-size: 28px; font-weight: 900; }
-      .lists { display:grid; grid-template-columns: 1fr 1fr; gap:16px; margin-top:16px; }
-      @media (max-width: 900px) { .lists { grid-template-columns: 1fr; } }
-      .kvlist { list-style:none; margin:0; padding:0; }
-      .kvlist li { display:flex; align-items:center; justify-content:space-between; padding:8px 0; border-bottom:1px solid #f1f5f9; font-weight:600; }
-      .scroll { max-height:220px; overflow-y:auto; padding-right:6px; }
-      table { width:100%; border-collapse: collapse; background:#fff; border:1px solid var(--border); border-radius:12px; overflow:hidden; margin-top:16px; table-layout: fixed; }
-      th, td { text-align:left; padding:12px 14px; border-bottom:1px solid #f3f4f6; font-size:14px; vertical-align: top; word-wrap: break-word; }
-      th { background:#f8fafc; }
-      h2 { margin: 20px 0 8px; }
-      .conf-high { color:#15803d; font-weight:800; }  /* green */
-      .conf-mid  { color:#b45309; font-weight:800; }  /* orange */
-      .conf-low  { color:#b91c1c; font-weight:800; }  /* red */
-      /* Give mail-dates a reasonable width */
-      th.col-maildates, td.col-maildates { width: 180px; }
+      :root {{
+        --brand: {BRAND};
+        --accent: {ACCENT};
+        --on-brand: #ffffff;
+        --bg: #ffffff;
+        --text: #0f172a;
+        --muted: #64748b;
+        --card: #ffffff;
+        --border: #e5e7eb;
+      }}
+      * {{ box-sizing: border-box; }}
+      body {{ margin:0; padding:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; background: var(--bg); color: var(--text); }}
+      .container {{ max-width: 1200px; margin: 0 auto; padding: 24px; }}
+
+      .grid-kpi {{ display:grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin: 16px 0 8px; }}
+      .card {{ background: var(--card); border: 1px solid var(--border); border-radius: 16px; padding: 16px; box-shadow: 0 2px 10px rgba(0,0,0,0.04); }}
+      .kpi .k {{ color: var(--muted); font-size: 13px; }}
+      .kpi .v {{ font-size: 30px; font-weight: 900; }}
+      .kpi {{ border-top: 4px solid var(--brand); }}
+
+      .grid-top {{ display:grid; grid-template-columns: 1fr 1fr; gap: 16px; margin: 8px 0 16px; }}
+      .scroll {{ max-height: 200px; overflow: auto; border:1px solid var(--border); border-radius: 12px; padding: 8px; }}
+      .li {{ display:flex; justify-content: space-between; padding: 8px 6px; border-bottom: 1px dashed #eef2f7; }}
+      .li:last-child {{ border-bottom: 0; }}
+      .name {{ font-weight: 700; }}
+      .cnt {{ color: var(--muted); }}
+
+      .chart {{ margin: 8px 0 24px; padding: 16px; }}
+      .chart .bar {{ display:flex; align-items:center; gap: 8px; margin: 6px 0; }}
+      .chart .bar .label {{ width: 110px; text-align: right; font-size: 12px; color: var(--muted); }}
+      .chart .bar .fill {{ height: 14px; background: color-mix(in oklab, var(--brand) 22%, white); border:1px solid color-mix(in oklab, var(--brand) 50%, white); border-radius: 8px; }}
+      .chart .bar .val {{ font-size: 12px; color: var(--muted); }}
+
+      table {{ width: 100%; border-collapse: collapse; background: #fff; border-radius: 12px; overflow: hidden; }}
+      thead th {{ background: #f8fafc; text-align:left; padding: 12px 14px; border-bottom: 1px solid #f1f5f9; font-size: 13px; }}
+      tbody td {{ padding: 12px 14px; border-bottom: 1px solid #f3f4f6; font-size: 14px; }}
+      tbody tr:hover {{ background:#fafafa; }}
+      .mono {{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }}
+      .conf {{ font-weight: 800; }}
+      .conf-high {{ color: #065f46; }}  /* green-ish */
+      .conf-mid  {{ color: #92400e; }}  /* amber-ish */
+      .conf-low  {{ color: #991b1b; }}  /* red-ish */
+
+      @media (max-width: 900px) {{
+        .grid-kpi {{ grid-template-columns: 1fr 1fr; }}
+        .grid-top {{ grid-template-columns: 1fr; }}
+      }}
     </style>
     """
 
-    # KPIs
-    kpi_items = [
-        f'<div class="card"><div class="k">Total mail records</div><div class="v">{_esc(total_mail)}</div></div>',
-        f'<div class="card"><div class="k">Matches</div><div class="v">{total_matches}</div></div>',
-        f'<div class="card"><div class="k">Total revenue</div><div class="v">${total_revenue:,.2f}</div></div>',
-    ]
-    if avg_mailers_prior is not None:
-        kpi_items.append(f'<div class="card"><div class="k">Avg. mailers before job</div><div class="v">{avg_mailers_prior:.2f}</div></div>')
-    if mailers_per_acq is not None:
-        kpi_items.append(f'<div class="card"><div class="k">Mailers per acquisition</div><div class="v">{mailers_per_acq:.2f}</div></div>')
-    kpis_html = f'<div class="grid">{"".join(kpi_items)}</div>'
-
-    # Lists + Chart
-    def _city_ul(df):
-        items = []
-        for _, r in df.iterrows():
-            items.append(f"<li><span>{_esc(r['crm_city'])}, {_esc(r['crm_state'])}</span><strong>{int(r['matches'])}</strong></li>")
-        return "<ul class='kvlist'>" + "".join(items) + "</ul>"
-
-    def _zip_ul(df):
-        items = []
-        for _, r in df.iterrows():
-            items.append(f"<li><span>{_esc(str(r['crm_zip']))}</span><strong>{int(r['matches'])}</strong></li>")
-        return "<ul class='kvlist'>" + "".join(items) + "</ul>"
-
-    lists_html = f"""
-      <div class="lists">
-        <div class="card">
-          <div class="k">Top Cities</div>
-          <div class="scroll">{_city_ul(city_counts)}</div>
+    kpis_html = f"""
+      <div class="grid-kpi">
+        <div class="card kpi">
+          <div class="k">Total mail records</div>
+          <div class="v">{total_mail:,}</div>
         </div>
-        <div class="card">
-          <div class="k">Top ZIPs</div>
-          <div class="scroll">{_zip_ul(zip_counts)}</div>
+        <div class="card kpi">
+          <div class="k">Matches</div>
+          <div class="v">{total_matches:,}</div>
+        </div>
+        <div class="card kpi">
+          <div class="k">Total revenue generated</div>
+          <div class="v">${total_revenue:,.2f}</div>
+        </div>
+        <div class="card kpi">
+          <div class="k">Avg mailers before engagement</div>
+          <div class="v">{avg_mailers_before:.2f}</div>
         </div>
       </div>
-      <div class="card" style="margin-top:16px;">
-        <div class="k">Matched jobs by month</div>
-        <div style="margin-top:8px">{month_img_tag}</div>
+      <div class="card kpi" style="margin-top:-4px;">
+        <div class="k">Mailers per acquisition</div>
+        <div class="v">{mailers_per_acq:.2f}</div>
       </div>
     """
 
-    # Sort by most recent CRM date; fallback to mail date
-    d["_crm_dt"] = pd.to_datetime(d.get("crm_job_date",""), errors="coerce")
-    d["_mail_dt"] = pd.to_datetime(d.get("mail_date",""), errors="coerce")
-    d["_sort_dt"] = d["_crm_dt"].fillna(d["_mail_dt"])
-    d = d.sort_values("_sort_dt", ascending=False)
-
-    # Table (add Mail Dates far-left)
-    head = """
-      <table>
-        <thead>
-          <tr>
-            <th class="col-maildates">Mail Dates</th>
-            <th>CRM Date</th>
-            <th>Amount</th>
-            <th>Mail Address</th>
-            <th>Mail City/State/Zip</th>
-            <th>CRM Address</th>
-            <th>CRM City/State/Zip</th>
-            <th>Confidence</th>
-            <th>Notes</th>
-          </tr>
-        </thead>
-        <tbody>
+    top_section = f"""
+      <div class="grid-top">
+        <div class="card">
+          <div class="k" style="margin-bottom:8px;">Top Cities (matches)</div>
+          <div class="scroll">{cities_html}</div>
+        </div>
+        <div class="card">
+          <div class="k" style="margin-bottom:8px;">Top ZIP Codes (matches)</div>
+          <div class="scroll">{zips_html}</div>
+        </div>
+      </div>
     """
-    rows_html: List[str] = []
-    for _, r in d.head(200).iterrows():
-        mail_addr = _format_addr_with_unit(
-            r.get("address1",""), r.get("address2",""),
-            r.get("city",""), r.get("state",""), r.get("zip","")
-        )
-        crm_addr  = _format_addr_with_unit(
-            r.get("crm_address1",""), r.get("crm_address2",""),
-            r.get("crm_city",""), r.get("crm_state",""), r.get("crm_zip","")
-        )
-        conf_html = _conf_span(r.get("confidence", ""))
-        mail_dates = r.get("mail_dates_in_window", "")
-        rows_html.append(f"""
-          <tr>
-            <td class="col-maildates">{_esc(mail_dates)}</td>
-            <td>{_esc(r.get('crm_job_date',''))}</td>
-            <td>{_esc(r.get('crm_amount',''))}</td>
-            <td>{_esc(mail_addr)}</td>
-            <td>{_esc(_format_city_state_zip(r.get('city',''), r.get('state',''), r.get('zip','')))}</td>
-            <td>{_esc(crm_addr)}</td>
-            <td>{_esc(_format_city_state_zip(r.get('crm_city',''), r.get('crm_state',''), r.get('crm_zip','')))}</td>
-            <td>{conf_html}</td>
-            <td>{_esc(r.get('match_notes',''))}</td>
-          </tr>
+
+    chart_section = f"""
+      <div class="card chart">
+        <div class="k" style="margin-bottom:8px;">Matched Jobs by Month</div>
+        {chart_html}
+      </div>
+    """
+
+    table_html = f"""
+      <div class="card">
+        <div class="k" style="margin-bottom:8px;">Sample of Matches</div>
+        <div class="k" style="color: var(--muted); margin-bottom:12px;">Sorted by most recent CRM date (falls back to mail date).</div>
+        <div style="overflow-x:auto;">
+          <table>
+            <thead>
+              <tr>
+                <th class="mono">Mail Dates</th>
+                <th class="mono">CRM Date</th>
+                <th class="mono">Amount</th>
+                <th>Mail Address</th>
+                <th>Mail City/State/Zip</th>
+                <th>CRM Address</th>
+                <th>CRM City/State/Zip</th>
+                <th>Confidence</th>
+                <th>Notes</th>
+              </tr>
+            </thead>
+            <tbody>
+              {''.join(table_rows)}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    """
+
+    html = f"""
+    {css}
+    <div class="container">
+      {kpis_html}
+      {top_section}
+      {chart_section}
+      {table_html}
+    </div>
+    """
+    return html
+
+
+def _horizontal_bar_chart(month_counts: pd.Series) -> str:
+    """Return HTML for a simple horizontal bar chart."""
+    if month_counts is None or len(month_counts) == 0:
+        return "<div class='empty'>No monthly data</div>"
+    max_v = max(int(v) for v in month_counts.values) or 1
+    rows = []
+    # Keep chronological order by index (YYYY-MM)
+    for label, val in month_counts.items():
+        pct = int((int(val) / max_v) * 100)
+        rows.append(f"""
+          <div class="bar">
+            <div class="label">{_escape(label)}</div>
+            <div class="fill" style="width:{pct}%"></div>
+            <div class="val">{int(val)}</div>
+          </div>
         """)
-    table_html = head + "\n".join(rows_html) + "\n</tbody></table>"
+    return "\n".join(rows)
 
-    return css + kpis_html + lists_html + "<h2>Sample of Matches</h2>" + table_html
+
+def _escape(s: str) -> str:
+    if s is None:
+        return ""
+    return (
+        str(s)
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
