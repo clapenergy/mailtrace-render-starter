@@ -1,14 +1,13 @@
 # app/dashboard_export.py
-# MailTrace Dashboard Renderer — v17-preview R8 (robust columns)
+# MailTrace Dashboard Renderer — v17-preview R8a (robust columns, KPI fix)
 #
-# Improvements:
 # - Case-insensitive detection of columns (amount/value, crm date, crm city/state/zip, confidence)
 # - Robust date parsing (dayfirst+multiple formats) so monthly chart and sorting work
 # - Mail Dates shown far-left (uses mail_dates_in_window / mail_dates / mail_history)
 # - Top Cities/ZIPs back to normal (pulls CRM geography reliably)
-# - Confidence accepts "100%" strings
+# - Confidence accepts "100%" strings (color-coded)
 # - Horizontal "Matched Jobs by Month" chart; Top 5 cities/zips with scroll; KPI layout
-#
+# - FIX: mailers per acquisition f-string format error
 from __future__ import annotations
 import math, re
 import pandas as pd
@@ -18,7 +17,6 @@ ACCENT = "#759d40"
 
 # ---------- small utils ----------
 def _lower_map(cols):
-    """Return dict: lower_name -> original_name (first seen)."""
     m = {}
     for c in cols:
         lc = str(c).strip().lower()
@@ -27,7 +25,6 @@ def _lower_map(cols):
     return m
 
 def _get_col_ci(df: pd.DataFrame, *candidates) -> str | None:
-    """Case-insensitive pick of first present candidate name."""
     m = _lower_map(df.columns)
     for cand in candidates:
         lc = str(cand).strip().lower()
@@ -36,19 +33,15 @@ def _get_col_ci(df: pd.DataFrame, *candidates) -> str | None:
     return None
 
 def _as_ts_flexible(s):
-    """Parse dates from many formats (dayfirst tolerant). Returns NaT on failure."""
     if s is None or (isinstance(s, float) and math.isnan(s)):
         return pd.NaT
     txt = str(s).strip()
     if not txt:
         return pd.NaT
-    # try normal
     ts = pd.to_datetime(txt, errors="coerce", infer_datetime_format=True)
     if pd.isna(ts):
-        # try dayfirst (for dd-mm-yy)
         ts = pd.to_datetime(txt, errors="coerce", dayfirst=True)
     if pd.isna(ts):
-        # last-ditch: swap '/' -> '-' and retry
         ts2 = txt.replace("/", "-")
         ts = pd.to_datetime(ts2, errors="coerce", dayfirst=True)
     return ts
@@ -131,13 +124,13 @@ def _join_cityline_series(city, state, zipc) -> pd.Series:
 def finalize_summary_for_export_v17(summary: pd.DataFrame) -> pd.DataFrame:
     df_raw = summary.copy()
 
-    # CASE-INSENSITIVE field picks
     # Confidence
     conf_col = _get_col_ci(df_raw, "confidence_percent", "confidence", "match_confidence", "score")
     if conf_col:
         conf_vals = df_raw[conf_col].map(lambda x: _safe_int(x, 0)).fillna(0).astype(int).clip(0, 100)
     else:
         conf_vals = pd.Series([0]*len(df_raw))
+
     # CRM Date
     crm_date_col = _get_col_ci(df_raw, "crm_job_date", "crm_date", "job_date", "crm date", "crm-date", "date")
     crm_date_raw = df_raw[crm_date_col] if crm_date_col else pd.Series([""]*len(df_raw))
@@ -166,7 +159,7 @@ def finalize_summary_for_export_v17(summary: pd.DataFrame) -> pd.DataFrame:
             break
     mail_dates_series = df_raw[mail_dates_col] if mail_dates_col else pd.Series([""]*len(df_raw))
 
-    # Mail side address bits (prefer full if present)
+    # Mail side
     full_mail_col = _get_col_ci(df_raw, "matched_mail_full_address")
     if full_mail_col:
         mail_street_series = df_raw[full_mail_col].fillna("")
@@ -183,7 +176,7 @@ def finalize_summary_for_export_v17(summary: pd.DataFrame) -> pd.DataFrame:
         mail_zip_series = df_raw.get(_get_col_ci(df_raw, "zip","postal_code","zipcode","zip_code","mail_zip"), "")
         mail_cityline = _join_cityline_series(mail_city_series, mail_state_series, mail_zip_series)
 
-    # CRM side address bits
+    # CRM side
     crm_a1 = df_raw.get(_get_col_ci(df_raw, "crm_address1","address1","crm street","crm_addr1"), "")
     crm_a2 = df_raw.get(_get_col_ci(df_raw, "crm_address2","address2","crm unit","crm_addr2","unit"), "")
     crm_street_series = _join_street_series(crm_a1, crm_a2)
@@ -237,7 +230,7 @@ def render_full_dashboard_v17(summary_df: pd.DataFrame, mail_total_count: int) -
     total_revenue = float(df.__dict__.get("__aux_amount_float", pd.Series([0.0]*len(df))).sum())
     mail_counts = df.__dict__.get("__aux_mail_count", pd.Series([0]*len(df)))
     avg_mailers_before = float(mail_counts.mean()) if len(mail_counts) else 0.0
-    mailers_per_acq = (total_mail / total_matches) if total_matches else 0.0
+    mailers_per_acq = (total_mail / total_matches) if total_matches else 0.0  # <- compute first
 
     # Top cities / zips (CRM side) — top 5
     crm_city = df.__dict__.get("__aux_crm_city", pd.Series([], dtype="object")).fillna("")
@@ -338,7 +331,8 @@ def render_full_dashboard_v17(summary_df: pd.DataFrame, mail_total_count: int) -
     </style>
     """
 
-    # KPI block
+    # KPI block (fixed f-string usage)
+    mpa_str = f"{mailers_per_acq:.2f}"
     kpis_html = f"""
       <div class="grid-kpi">
         <div class="card kpi">
@@ -360,7 +354,7 @@ def render_full_dashboard_v17(summary_df: pd.DataFrame, mail_total_count: int) -
       </div>
       <div class="card kpi" style="margin-top:-4px;">
         <div class="k">Mailers per acquisition</div>
-        <div class="v">{(total_mail/total_matches):.2f if total_matches else 0.0:.2f}</div>
+        <div class="v">{mpa_str}</div>
       </div>
     """
 
