@@ -1,40 +1,62 @@
 # app/dashboard_export.py
-# MailTrace Dashboard Renderer — v17-preview R7
-# - Adds "Mail Dates" as the FAR-LEFT column in the summary table
-# - Horizontal "Matched Jobs by Month" chart
-# - Top Cities / Top ZIPs (top 5, scrollable)
-# - KPI cards: Total Mail, Matches, Total Revenue, Avg Mailers Before Engagement, Mailers per Acquisition
-# - Confidence color-coding
+# MailTrace Dashboard Renderer — v17-preview R8 (robust columns)
 #
-# Exposed functions:
-#   - finalize_summary_for_export_v17(summary_df) -> DataFrame (cleaned for CSV + render)
-#   - render_full_dashboard_v17(summary_df, mail_total_count: int) -> HTML string
-
+# Improvements:
+# - Case-insensitive detection of columns (amount/value, crm date, crm city/state/zip, confidence)
+# - Robust date parsing (dayfirst+multiple formats) so monthly chart and sorting work
+# - Mail Dates shown far-left (uses mail_dates_in_window / mail_dates / mail_history)
+# - Top Cities/ZIPs back to normal (pulls CRM geography reliably)
+# - Confidence accepts "100%" strings
+# - Horizontal "Matched Jobs by Month" chart; Top 5 cities/zips with scroll; KPI layout
+#
 from __future__ import annotations
-import math
+import math, re
 import pandas as pd
-from datetime import datetime
-from io import StringIO
 
 BRAND = "#0c2d4e"
 ACCENT = "#759d40"
 
-# -----------------------------
-# Helpers
-# -----------------------------
-def _as_date_any(x) -> pd.Timestamp | None:
-    if x is None or (isinstance(x, float) and math.isnan(x)):  # NaN
-        return None
-    try:
-        return pd.to_datetime(x, errors="coerce")
-    except Exception:
-        return None
+# ---------- small utils ----------
+def _lower_map(cols):
+    """Return dict: lower_name -> original_name (first seen)."""
+    m = {}
+    for c in cols:
+        lc = str(c).strip().lower()
+        if lc not in m:
+            m[lc] = c
+    return m
+
+def _get_col_ci(df: pd.DataFrame, *candidates) -> str | None:
+    """Case-insensitive pick of first present candidate name."""
+    m = _lower_map(df.columns)
+    for cand in candidates:
+        lc = str(cand).strip().lower()
+        if lc in m:
+            return m[lc]
+    return None
+
+def _as_ts_flexible(s):
+    """Parse dates from many formats (dayfirst tolerant). Returns NaT on failure."""
+    if s is None or (isinstance(s, float) and math.isnan(s)):
+        return pd.NaT
+    txt = str(s).strip()
+    if not txt:
+        return pd.NaT
+    # try normal
+    ts = pd.to_datetime(txt, errors="coerce", infer_datetime_format=True)
+    if pd.isna(ts):
+        # try dayfirst (for dd-mm-yy)
+        ts = pd.to_datetime(txt, errors="coerce", dayfirst=True)
+    if pd.isna(ts):
+        # last-ditch: swap '/' -> '-' and retry
+        ts2 = txt.replace("/", "-")
+        ts = pd.to_datetime(ts2, errors="coerce", dayfirst=True)
+    return ts
 
 def _fmt_currency(x) -> str:
     if x is None or x == "" or (isinstance(x, float) and math.isnan(x)):
         return ""
     try:
-        # Strip currency symbols/commas if present
         s = str(x).replace("$", "").replace(",", "").strip()
         val = float(s)
         return "${:,.2f}".format(val)
@@ -49,14 +71,6 @@ def _parse_currency_to_float(x) -> float:
         return float(s)
     except Exception:
         return 0.0
-
-def _coalesce(*vals):
-    for v in vals:
-        if isinstance(v, str) and v.strip():
-            return v
-        if v not in (None, "", float("nan")):
-            return v
-    return ""
 
 def _join_addr(city, state, zipc) -> str:
     city = str(city or "").strip()
@@ -74,151 +88,28 @@ def _join_street_with_unit(street, unit) -> str:
     street = str(street or "").strip()
     unit = str(unit or "").strip()
     if unit:
-        # Use comma separator between street and unit as requested
         return f"{street}, {unit}"
     return street
 
-def _month_key(ts: pd.Timestamp | None) -> str:
-    if ts is None or pd.isna(ts):
-        return ""
-    return ts.strftime("%Y-%m")
-
 def _safe_int(x, default=0):
     try:
-        return int(x)
+        if isinstance(x, str) and x.endswith("%"):
+            x = x[:-1]
+        return int(float(x))
     except Exception:
         return default
 
-# -----------------------------
-# Public: finalize for CSV + render
-# -----------------------------
-def finalize_summary_for_export_v17(summary: pd.DataFrame) -> pd.DataFrame:
-    """
-    Normalizes columns expected by the renderer & CSV export.
-    Expected potential columns from your pipeline/matcher:
-      - crm_job_date (string date) OR crm_date
-      - amount / crm_amount / value (currency)
-      - matched_mail_full_address OR (address1/address2 + city/state/zip)
-      - mail_dates_in_window (comma-delimited dd-mm-yy, etc.)  <-- used for Mail Dates column
-      - match_notes
-      - confidence_percent (0..100) OR confidence
-      - crm_* address parts, mail_* address parts
-    Returns a NEW DataFrame with normalized columns for the dashboard table.
-    """
-    df = summary.copy()
-
-    # Normalize confidence column → integer 0..100
-    if "confidence_percent" in df.columns:
-        conf = df["confidence_percent"]
-    elif "confidence" in df.columns:
-        conf = df["confidence"]
-    else:
-        conf = 0
-    df["__confidence"] = pd.to_numeric(conf, errors="coerce").fillna(0).astype(int).clip(0, 100)
-
-    # Normalize CRM date
-    date_col = None
-    for cand in ["crm_job_date", "crm_date", "CRM Date", "job_date"]:
-        if cand in df.columns:
-            date_col = cand
-            break
-    # Keep original string for display ordering/fallback parse
-    df["__crm_date_raw"] = df[date_col] if date_col else ""
-
-    # Parse to timestamp for sorting and monthly chart
-    def _to_ts(x):
-        if pd.isna(x) or str(x).strip() == "":
-            return pd.NaT
-        try:
-            return pd.to_datetime(x, errors="coerce")
-        except Exception:
-            return pd.NaT
-    df["__crm_ts"] = df["__crm_date_raw"].apply(_to_ts)
-
-    # Amount normalization
-    amt_col = None
-    for cand in ["amount", "crm_amount", "job_value", "value", "revenue"]:
-        if cand in df.columns:
-            amt_col = cand
-            break
-    if amt_col:
-        df["__amount_display"] = df[amt_col].map(_fmt_currency)
-        df["__amount_float"] = df[amt_col].map(_parse_currency_to_float)
-    else:
-        df["__amount_display"] = ""
-        df["__amount_float"] = 0.0
-
-    # Build compact display fields for Mail & CRM address lines
-    # MAIL side
-    mail_street = _coalesce(df.get("matched_mail_full_address", ""))
-    if not isinstance(mail_street, pd.Series):
-        mail_street = pd.Series([""] * len(df))
-    # If matched_mail_full_address not present, try composing from parts
-    if mail_street.eq("").all():
-        mail_street = _join_street_series(
-            df.get("address1",""), df.get("address2","")
-        )
-    mail_cityline = _join_cityline_series(
-        df.get("city",""), df.get("state",""), df.get("zip","")
+def _escape(s: str) -> str:
+    if s is None:
+        return ""
+    return (
+        str(s)
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
     )
 
-    # CRM side (street and cityline)
-    crm_street_series = _join_street_series(
-        df.get("crm_address1","") if "crm_address1" in df.columns else df.get("address1",""),
-        df.get("crm_address2","") if "crm_address2" in df.columns else df.get("address2",""),
-    )
-    crm_cityline_series = _join_cityline_series(
-        df.get("crm_city","") if "crm_city" in df.columns else df.get("city",""),
-        df.get("crm_state","") if "crm_state" in df.columns else df.get("state",""),
-        df.get("crm_zip","") if "crm_zip" in df.columns else df.get("zip",""),
-    )
-
-    # Mail dates list (string) – this powers the Mail Dates column
-    if "mail_dates_in_window" not in df.columns:
-        # Try a fallback if your pipeline named it differently
-        for alt in ["mail_dates", "mail_history", "mailing_dates"]:
-            if alt in df.columns:
-                df["mail_dates_in_window"] = df[alt]
-                break
-    if "mail_dates_in_window" not in df.columns:
-        df["mail_dates_in_window"] = ""  # last resort
-
-    # Notes
-    notes_col = "match_notes" if "match_notes" in df.columns else None
-    df["__notes"] = df[notes_col] if notes_col else ""
-
-    # Build the *render* DataFrame in the exact column order needed by the UI table.
-    out = pd.DataFrame({
-        "Mail Dates": df["mail_dates_in_window"],                              # FAR-LEFT
-        "CRM Date": df["__crm_date_raw"],
-        "Amount": df["__amount_display"],
-        "Mail Address": mail_street,
-        "Mail City/State/Zip": mail_cityline,
-        "CRM Address": crm_street_series,
-        "CRM City/State/Zip": crm_cityline_series,
-        "Confidence": df["__confidence"].astype(int),
-        "Notes": df["__notes"].fillna(""),
-    })
-
-    # Keep auxiliary series for KPIs/graph in the same object (so renderer can access)
-    out.__dict__["__aux_crm_ts"] = df["__crm_ts"]
-    out.__dict__["__aux_amount_float"] = df["__amount_float"]
-
-    # Also keep a tiny projection for Top Cities/ZIPs on the CRM side
-    out.__dict__["__aux_crm_city"] = (df.get("crm_city") if "crm_city" in df.columns else df.get("city"))
-    out.__dict__["__aux_crm_state"] = (df.get("crm_state") if "crm_state" in df.columns else df.get("state"))
-    out.__dict__["__aux_crm_zip"] = (df.get("crm_zip") if "crm_zip" in df.columns else df.get("zip"))
-
-    # For "Avg # mailers before engagement", try to compute from a mail_count column if present
-    # (Your matcher often outputs mail_count_in_window.)
-    if "mail_count_in_window" in df.columns:
-        out.__dict__["__aux_mail_count"] = pd.to_numeric(df["mail_count_in_window"], errors="coerce").fillna(0).astype(int)
-    else:
-        out.__dict__["__aux_mail_count"] = pd.Series([0]*len(out))
-
-    return out
-
-
+# ---------- series builders ----------
 def _join_street_series(a1, a2) -> pd.Series:
     a1s = pd.Series(a1, dtype="object") if not isinstance(a1, pd.Series) else a1.astype("object")
     a2s = pd.Series(a2, dtype="object") if not isinstance(a2, pd.Series) else a2.astype("object")
@@ -236,55 +127,128 @@ def _join_cityline_series(city, state, zipc) -> pd.Series:
         rows.append(_join_addr(c, s, z))
     return pd.Series(rows, dtype="object")
 
+# ---------- public: finalize ----------
+def finalize_summary_for_export_v17(summary: pd.DataFrame) -> pd.DataFrame:
+    df_raw = summary.copy()
 
-# -----------------------------
-# Public: HTML renderer
-# -----------------------------
+    # CASE-INSENSITIVE field picks
+    # Confidence
+    conf_col = _get_col_ci(df_raw, "confidence_percent", "confidence", "match_confidence", "score")
+    if conf_col:
+        conf_vals = df_raw[conf_col].map(lambda x: _safe_int(x, 0)).fillna(0).astype(int).clip(0, 100)
+    else:
+        conf_vals = pd.Series([0]*len(df_raw))
+    # CRM Date
+    crm_date_col = _get_col_ci(df_raw, "crm_job_date", "crm_date", "job_date", "crm date", "crm-date", "date")
+    crm_date_raw = df_raw[crm_date_col] if crm_date_col else pd.Series([""]*len(df_raw))
+    crm_ts = crm_date_raw.map(_as_ts_flexible)
+
+    # Amount / revenue
+    amt_col = None
+    for cand in ["amount", "crm_amount", "job_value", "value", "revenue", "Amount", "Job Value"]:
+        c = _get_col_ci(df_raw, cand)
+        if c:
+            amt_col = c
+            break
+    if amt_col:
+        amt_disp = df_raw[amt_col].map(_fmt_currency)
+        amt_float = df_raw[amt_col].map(_parse_currency_to_float)
+    else:
+        amt_disp = pd.Series([""]*len(df_raw))
+        amt_float = pd.Series([0.0]*len(df_raw))
+
+    # Mail Dates (string list)
+    mail_dates_col = None
+    for cand in ["mail_dates_in_window", "mail_dates", "mailing_dates", "mail history", "mail_history"]:
+        c = _get_col_ci(df_raw, cand)
+        if c:
+            mail_dates_col = c
+            break
+    mail_dates_series = df_raw[mail_dates_col] if mail_dates_col else pd.Series([""]*len(df_raw))
+
+    # Mail side address bits (prefer full if present)
+    full_mail_col = _get_col_ci(df_raw, "matched_mail_full_address")
+    if full_mail_col:
+        mail_street_series = df_raw[full_mail_col].fillna("")
+        mail_city_series = df_raw.get(_get_col_ci(df_raw, "city"), "")
+        mail_state_series = df_raw.get(_get_col_ci(df_raw, "state"), "")
+        mail_zip_series = df_raw.get(_get_col_ci(df_raw, "zip","postal_code","zipcode","zip_code"), "")
+        mail_cityline = _join_cityline_series(mail_city_series, mail_state_series, mail_zip_series)
+    else:
+        a1 = df_raw.get(_get_col_ci(df_raw, "address1","mail_address1","mail street","street","addr1","address"), "")
+        a2 = df_raw.get(_get_col_ci(df_raw, "address2","mail_address2","unit","addr2","line2"), "")
+        mail_street_series = _join_street_series(a1, a2)
+        mail_city_series = df_raw.get(_get_col_ci(df_raw, "city","mail_city"), "")
+        mail_state_series = df_raw.get(_get_col_ci(df_raw, "state","mail_state","st"), "")
+        mail_zip_series = df_raw.get(_get_col_ci(df_raw, "zip","postal_code","zipcode","zip_code","mail_zip"), "")
+        mail_cityline = _join_cityline_series(mail_city_series, mail_state_series, mail_zip_series)
+
+    # CRM side address bits
+    crm_a1 = df_raw.get(_get_col_ci(df_raw, "crm_address1","address1","crm street","crm_addr1"), "")
+    crm_a2 = df_raw.get(_get_col_ci(df_raw, "crm_address2","address2","crm unit","crm_addr2","unit"), "")
+    crm_street_series = _join_street_series(crm_a1, crm_a2)
+
+    crm_city = df_raw.get(_get_col_ci(df_raw, "crm_city","city"), "")
+    crm_state = df_raw.get(_get_col_ci(df_raw, "crm_state","state","st"), "")
+    crm_zip = df_raw.get(_get_col_ci(df_raw, "crm_zip","zip","postal_code","zipcode","zip_code"), "")
+    crm_cityline_series = _join_cityline_series(crm_city, crm_state, crm_zip)
+
+    # Notes
+    notes_col = _get_col_ci(df_raw, "match_notes","notes")
+    notes_series = df_raw[notes_col] if notes_col else pd.Series([""]*len(df_raw))
+
+    # Mail count (for KPI avg mailers before engagement)
+    mc_col = _get_col_ci(df_raw, "mail_count_in_window", "mail_count", "mailers_before")
+    mail_count_series = (
+        pd.to_numeric(df_raw[mc_col], errors="coerce").fillna(0).astype(int)
+        if mc_col else pd.Series([0]*len(df_raw))
+    )
+
+    # Build normalized table for rendering
+    out = pd.DataFrame({
+        "Mail Dates": mail_dates_series,
+        "CRM Date": crm_date_raw.fillna(""),
+        "Amount": amt_disp.fillna(""),
+        "Mail Address": mail_street_series.fillna(""),
+        "Mail City/State/Zip": mail_cityline.fillna(""),
+        "CRM Address": crm_street_series.fillna(""),
+        "CRM City/State/Zip": crm_cityline_series.fillna(""),
+        "Confidence": conf_vals.astype(int),
+        "Notes": notes_series.fillna(""),
+    })
+
+    # Aux for KPIs / charts
+    out.__dict__["__aux_crm_ts"] = crm_ts
+    out.__dict__["__aux_amount_float"] = amt_float
+    out.__dict__["__aux_crm_city"] = crm_city
+    out.__dict__["__aux_crm_state"] = crm_state
+    out.__dict__["__aux_crm_zip"] = crm_zip
+    out.__dict__["__aux_mail_count"] = mail_count_series
+
+    return out
+
+# ---------- public: renderer ----------
 def render_full_dashboard_v17(summary_df: pd.DataFrame, mail_total_count: int) -> str:
-    """
-    Build the full HTML for the dashboard using the normalized summary_df produced
-    by finalize_summary_for_export_v17().
-    """
     df = summary_df.copy()
 
-    # KPI metrics
-    total_mail = mail_total_count
-    total_matches = len(df)
+    # KPIs
+    total_mail = int(mail_total_count or 0)
+    total_matches = int(len(df))
     total_revenue = float(df.__dict__.get("__aux_amount_float", pd.Series([0.0]*len(df))).sum())
-
-    # Avg # of mailers before engagement
     mail_counts = df.__dict__.get("__aux_mail_count", pd.Series([0]*len(df)))
     avg_mailers_before = float(mail_counts.mean()) if len(mail_counts) else 0.0
-
-    # Mailers per acquisition = total_mail / total_matches (avoid div by zero)
     mailers_per_acq = (total_mail / total_matches) if total_matches else 0.0
 
-    # Top cities / zips from CRM side, top 5
-    crm_city = df.__dict__.get("__aux_crm_city", pd.Series([], dtype="object"))
-    crm_state = df.__dict__.get("__aux_crm_state", pd.Series([], dtype="object"))
-    crm_zip = df.__dict__.get("__aux_crm_zip", pd.Series([], dtype="object"))
+    # Top cities / zips (CRM side) — top 5
+    crm_city = df.__dict__.get("__aux_crm_city", pd.Series([], dtype="object")).fillna("")
+    crm_state = df.__dict__.get("__aux_crm_state", pd.Series([], dtype="object")).fillna("")
+    crm_zip = df.__dict__.get("__aux_crm_zip", pd.Series([], dtype="object")).fillna("")
 
-    top_cities = (
-        pd.DataFrame({"city": crm_city, "state": crm_state})
-        .fillna("")
-        .assign(cityline=lambda x: x["city"].astype(str).str.strip() + ", " + x["state"].astype(str).str.strip())
-        .groupby("cityline", dropna=False)
-        .size()
-        .sort_values(ascending=False)
-        .head(5)
-    )
+    cityline = (crm_city.astype(str).str.strip() + ", " + crm_state.astype(str).str.strip()).str.strip(", ")
+    top_cities = cityline[cityline != ""].value_counts().head(5)
 
-    top_zips = (
-        pd.Series(crm_zip, dtype="object")
-        .astype(str).str.strip()
-        .replace({"nan": "", "None": ""})
-        .groupby(lambda idx: df.index[idx])  # keep alignment
-        .apply(lambda x: x)
-        .reset_index(drop=True)
-        .value_counts()
-        .sort_values(ascending=False)
-        .head(5)
-    )
+    top_zips = crm_zip.astype(str).str.strip()
+    top_zips = top_zips[(top_zips != "") & (top_zips != "nan") & (top_zips != "None")].value_counts().head(5)
 
     # Monthly counts (by CRM date)
     ts = df.__dict__.get("__aux_crm_ts", pd.Series([], dtype="datetime64[ns]"))
@@ -297,60 +261,31 @@ def render_full_dashboard_v17(summary_df: pd.DataFrame, mail_total_count: int) -
         .sort_index()
     )
 
-    # Build HTML table rows (Mail Dates on the far left)
+    # Sort table by most recent CRM date
+    order_ts = pd.Series(ts).fillna(pd.Timestamp(0))
+    df_sorted = df.loc[order_ts.sort_values(ascending=False).index]
+
     def conf_class(v: int) -> str:
-        # simple color buckets
-        if v >= 94:
-            return "conf-high"
-        if v >= 88:
-            return "conf-mid"
+        if v >= 94: return "conf-high"
+        if v >= 88: return "conf-mid"
         return "conf-low"
 
-    table_rows = []
-    # Sort rows by most recent CRM date (falls back to Mail Dates first parsed date)
-    # For simplicity, we already have sorted by CRM date outside; but ensure display:
-    order_ts = ts.fillna(pd.Timestamp(0))
-    order = order_ts.sort_values(ascending=False).index
-    df_sorted = df.loc[order]
-
+    rows_html = []
     for _, r in df_sorted.iterrows():
-        mail_dates = str(r.get("Mail Dates") or "")
-        crm_date = str(r.get("CRM Date") or "")
-        amt = str(r.get("Amount") or "")
-        mail_addr = str(r.get("Mail Address") or "")
-        mail_cityline = str(r.get("Mail City/State/Zip") or "")
-        crm_addr = str(r.get("CRM Address") or "")
-        crm_cityline = str(r.get("CRM City/State/Zip") or "")
-        conf = _safe_int(r.get("Confidence"), 0)
-        notes = str(r.get("Notes") or "")
-        table_rows.append(f"""
+        rows_html.append(f"""
           <tr>
-            <td class="mono">{_escape(mail_dates)}</td>
-            <td class="mono">{_escape(crm_date)}</td>
-            <td class="mono">{_escape(amt)}</td>
-            <td>{_escape(mail_addr)}</td>
-            <td>{_escape(mail_cityline)}</td>
-            <td>{_escape(crm_addr)}</td>
-            <td>{_escape(crm_cityline)}</td>
-            <td class="conf {conf_class(conf)}">{conf}%</td>
-            <td>{_escape(notes)}</td>
+            <td class="mono">{_escape(r.get("Mail Dates"))}</td>
+            <td class="mono">{_escape(r.get("CRM Date"))}</td>
+            <td class="mono">{_escape(r.get("Amount"))}</td>
+            <td>{_escape(r.get("Mail Address"))}</td>
+            <td>{_escape(r.get("Mail City/State/Zip"))}</td>
+            <td>{_escape(r.get("CRM Address"))}</td>
+            <td>{_escape(r.get("CRM City/State/Zip"))}</td>
+            <td class="conf {conf_class(_safe_int(r.get("Confidence"), 0))}">{_safe_int(r.get("Confidence"), 0)}%</td>
+            <td>{_escape(r.get("Notes"))}</td>
           </tr>
         """)
 
-    # Render top cities/zips list items
-    def li_list(series_counts) -> str:
-        items = []
-        for label, cnt in series_counts.items():
-            items.append(f'<div class="li"><span class="name">{_escape(str(label))}</span><span class="cnt">{int(cnt)}</span></div>')
-        return "\n".join(items) or "<div class='empty'>No data</div>"
-
-    cities_html = li_list(top_cities)
-    zips_html = li_list(top_zips)
-
-    # Horizontal bar chart HTML for month_counts
-    chart_html = _horizontal_bar_chart(month_counts)
-
-    # CSS + HTML skeleton
     css = f"""
     <style>
       :root {{
@@ -403,6 +338,7 @@ def render_full_dashboard_v17(summary_df: pd.DataFrame, mail_total_count: int) -
     </style>
     """
 
+    # KPI block
     kpis_html = f"""
       <div class="grid-kpi">
         <div class="card kpi">
@@ -424,9 +360,21 @@ def render_full_dashboard_v17(summary_df: pd.DataFrame, mail_total_count: int) -
       </div>
       <div class="card kpi" style="margin-top:-4px;">
         <div class="k">Mailers per acquisition</div>
-        <div class="v">{mailers_per_acq:.2f}</div>
+        <div class="v">{(total_mail/total_matches):.2f if total_matches else 0.0:.2f}</div>
       </div>
     """
+
+    # Top lists
+    def li_list(series_counts) -> str:
+        if series_counts is None or len(series_counts) == 0:
+            return "<div class='empty'>No data</div>"
+        items = []
+        for label, cnt in series_counts.items():
+            items.append(f'<div class="li"><span class="name">{_escape(str(label))}</span><span class="cnt">{int(cnt)}</span></div>')
+        return "\n".join(items)
+
+    cities_html = li_list(top_cities)
+    zips_html = li_list(top_zips)
 
     top_section = f"""
       <div class="grid-top">
@@ -441,6 +389,8 @@ def render_full_dashboard_v17(summary_df: pd.DataFrame, mail_total_count: int) -
       </div>
     """
 
+    # Horizontal chart
+    chart_html = _horizontal_bar_chart(month_counts)
     chart_section = f"""
       <div class="card chart">
         <div class="k" style="margin-bottom:8px;">Matched Jobs by Month</div>
@@ -448,6 +398,7 @@ def render_full_dashboard_v17(summary_df: pd.DataFrame, mail_total_count: int) -
       </div>
     """
 
+    # Summary table
     table_html = f"""
       <div class="card">
         <div class="k" style="margin-bottom:8px;">Sample of Matches</div>
@@ -468,7 +419,7 @@ def render_full_dashboard_v17(summary_df: pd.DataFrame, mail_total_count: int) -
               </tr>
             </thead>
             <tbody>
-              {''.join(table_rows)}
+              {''.join(rows_html)}
             </tbody>
           </table>
         </div>
@@ -486,14 +437,11 @@ def render_full_dashboard_v17(summary_df: pd.DataFrame, mail_total_count: int) -
     """
     return html
 
-
 def _horizontal_bar_chart(month_counts: pd.Series) -> str:
-    """Return HTML for a simple horizontal bar chart."""
     if month_counts is None or len(month_counts) == 0:
         return "<div class='empty'>No monthly data</div>"
     max_v = max(int(v) for v in month_counts.values) or 1
     rows = []
-    # Keep chronological order by index (YYYY-MM)
     for label, val in month_counts.items():
         pct = int((int(val) / max_v) * 100)
         rows.append(f"""
@@ -504,14 +452,3 @@ def _horizontal_bar_chart(month_counts: pd.Series) -> str:
           </div>
         """)
     return "\n".join(rows)
-
-
-def _escape(s: str) -> str:
-    if s is None:
-        return ""
-    return (
-        str(s)
-        .replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-    )
