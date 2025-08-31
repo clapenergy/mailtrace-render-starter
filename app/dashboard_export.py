@@ -106,6 +106,14 @@ def _join_cityline_series(city, state, zipc) -> pd.Series:
 
 def finalize_summary_for_export_v17(summary: pd.DataFrame) -> pd.DataFrame:
     df_raw = summary.copy()
+    
+    # DEBUG: Print what columns we actually have
+    print("=== DEBUG: Available columns ===")
+    print(list(df_raw.columns))
+    if len(df_raw) > 0:
+        print("=== DEBUG: Sample row ===")
+        print(df_raw.iloc[0].to_dict())
+    print("=== END DEBUG ===")
 
     conf_col = _get_col_ci(df_raw, "confidence_percent", "confidence", "match_confidence", "score")
     if conf_col:
